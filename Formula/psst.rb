@@ -4,7 +4,7 @@ class Psst < Formula
   desc "Gentle hints for your shell, right before you need them"
   homepage "https://github.com/fire17/psst"
   url "https://github.com/fire17/psst/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "PLACEHOLDER_UPDATED_ON_RELEASE"
+  sha256 "9c593ca0d4179ff1f91c4dc5855c5c5432736b87f062acffdc67a0cc669dfc1b"
   license "MIT"
 
   depends_on "zsh"
