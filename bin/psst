@@ -1,0 +1,605 @@
+#!/usr/bin/env zsh
+# psst — gentle hints for your shell. CLI manager.
+# https://github.com/fire17/psst
+emulate -R zsh
+setopt extended_glob typeset_silent
+
+typeset -g PSST_VERSION="0.1.0"
+typeset -g SCRIPT=${0:A}
+typeset -g PSST_ROOT=${SCRIPT:h:h}
+source "$PSST_ROOT/lib/core.zsh"
+
+# ---------- ui helpers ----------
+if [[ -t 1 && -z $NO_COLOR ]]; then
+  typeset -g C_DIM=$'\e[2m' C_BOLD=$'\e[1m' C_PINK=$'\e[38;5;213m' C_GREEN=$'\e[32m'
+  typeset -g C_RED=$'\e[31m' C_YEL=$'\e[33m' C_CYAN=$'\e[36m' C_OFF=$'\e[0m'
+else
+  typeset -g C_DIM='' C_BOLD='' C_PINK='' C_GREEN='' C_RED='' C_YEL='' C_CYAN='' C_OFF=''
+fi
+
+die()  { print -r -- "${C_RED}psst:${C_OFF} $*" >&2; exit 1 }
+note() { print -r -- "${C_DIM}$*${C_OFF}" }
+ok()   { print -r -- "${C_GREEN}✓${C_OFF} $*" }
+
+# ---------- store helpers ----------
+typeset -g HEADER="# psst hints v1 — id	on	kind	targets	cooldown	chance	until	tags	hint (tab-separated; '-' = empty tags)"
+
+_ensure_store() {
+  [[ -d $PSST_DIR ]] || mkdir -p "$PSST_DIR"
+  [[ -f $PSST_HINTS ]] || print -r -- "$HEADER" > "$PSST_HINTS"
+}
+
+# read data rows (non-comment, non-empty) into $rows
+_read_rows() {
+  rows=()
+  [[ -r $PSST_HINTS ]] || return 0
+  local line
+  while IFS= read -r line; do
+    [[ -z $line || $line == \#* ]] && continue
+    rows+=("$line")
+  done < "$PSST_HINTS"
+}
+
+# atomically rewrite the store from $rows
+_save_rows() {
+  _ensure_store
+  local tmp="$PSST_HINTS.tmp.$$"
+  { print -r -- "$HEADER"
+    (( $#rows == 0 )) || print -rl -- "${rows[@]}"
+  } > "$tmp" || die "failed writing $tmp"
+  command mv -f "$tmp" "$PSST_HINTS" || die "failed replacing $PSST_HINTS"
+}
+
+# sets REPLY to a fresh id not present in $rows (REPLY, not $(...): keeps
+# RANDOM advancing and avoids subshells)
+_gen_id() {
+  local -A used
+  local r
+  for r in "${rows[@]}"; do used[${r%%	*}]=1; done
+  while true; do
+    printf -v REPLY '%04x' $(( ((RANDOM << 4) ^ RANDOM) & 0xffff ))
+    [[ -z ${used[$REPLY]} ]] && return 0
+  done
+}
+
+_sanitize() { print -rn -- "${1//[[:cntrl:]]/ }" }
+
+_dur_to_secs() {
+  local d=$1
+  case $d in
+    (<->)  print -rn -- "$d" ;;
+    (<->s) print -rn -- "${d%s}" ;;
+    (<->m) print -rn -- $(( ${d%m} * 60 )) ;;
+    (<->h) print -rn -- $(( ${d%h} * 3600 )) ;;
+    (<->d) print -rn -- $(( ${d%d} * 86400 )) ;;
+    (<->w) print -rn -- $(( ${d%w} * 604800 )) ;;
+    (*) return 1 ;;
+  esac
+}
+
+_secs_to_human() {
+  local s=$1
+  if   (( s >= 604800 )); then print -rn -- "$(( s / 604800 ))w"
+  elif (( s >= 86400 ));  then print -rn -- "$(( s / 86400 ))d"
+  elif (( s >= 3600 ));   then print -rn -- "$(( s / 3600 ))h"
+  elif (( s >= 60 ));     then print -rn -- "$(( s / 60 ))m"
+  else print -rn -- "${s}s"
+  fi
+}
+
+# find row index by id in $rows; sets REPLY or dies
+_row_index() {
+  local id=$1 i
+  for i in {1..$#rows}; do
+    [[ ${rows[$i]%%	*} == "$id" ]] && { REPLY=$i; return 0 }
+  done
+  die "no hint with id '$id' (see: psst list)"
+}
+
+_when_desc() { # kind targets -> human description of when it fires
+  local kind=$1 targets=$2
+  case $kind in
+    cmd) print -rn -- "${targets//,/, }" ;;
+    pat) print -rn -- "match: $targets" ;;
+    any) print -rn -- "any command" ;;
+  esac
+}
+
+# ---------- subcommands ----------
+psst_cmd_add() {
+  local kind=cmd cooldown=0 chance=100 snooze=0 id=""
+  local -a tags
+  local targets="" dir=""
+  while (( $# )); do
+    case $1 in
+      --pat|-P)      kind=pat; shift ;;
+      --any|-A)      kind=any; shift ;;
+      --cooldown|-c) cooldown=$(_dur_to_secs "$2") || die "bad duration: $2"; shift 2 ;;
+      --chance|-p)   chance=$2; [[ $chance == <-> ]] && (( chance >= 1 && chance <= 100 )) || die "chance must be 1-100"; shift 2 ;;
+      --tag|-t)      tags+=("$2"); shift 2 ;;
+      --in)          dir=${2:A}; shift 2 ;;
+      --id)          id=$2; shift 2 ;;
+      --)            shift; break ;;
+      -*)            die "unknown flag: $1 (see: psst help)" ;;
+      *)             break ;;
+    esac
+  done
+  if [[ $kind != any ]]; then
+    (( $# >= 2 )) || die "usage: psst add [flags] <targets> <hint...>"
+    targets=$1; shift
+  else
+    targets="-"
+    (( $# >= 1 )) || die "usage: psst add --any [flags] <hint...>"
+  fi
+  local hint; hint=$(_sanitize "$*")
+  [[ -n ${hint// } ]] || die "empty hint"
+  [[ $kind == cmd ]] && targets=${targets// }
+
+  [[ -n $dir ]] && tags+=("in=$dir")
+  local tagstr="-"
+  (( $#tags )) && tagstr=${(j:,:)tags}
+
+  local -a rows; _read_rows
+  local REPLY
+  [[ -n $id ]] || { _gen_id; id=$REPLY }
+  rows+=("${id}	1	${kind}	${targets}	${cooldown}	${chance}	${snooze}	${tagstr}	${hint}")
+  _save_rows
+  ok "added ${C_BOLD}${id}${C_OFF} — fires on ${C_CYAN}$(_when_desc $kind "$targets")${C_OFF}"
+  PSST_FORCE=1 _psst_emit "$hint"
+}
+
+psst_cmd_list() {
+  local porcelain=0 tui_lines=0 filter=""
+  while (( $# )); do
+    case $1 in
+      --porcelain) porcelain=1; shift ;;
+      --tui-lines) tui_lines=1; shift ;;
+      *) filter=$1; shift ;;
+    esac
+  done
+  local -a rows; _read_rows
+  if (( ! $#rows )); then
+    (( porcelain || tui_lines )) && return 0
+    note "no hints yet — try: psst add nano \"Use fresh for a more modern file editor! :D\""
+    return 0
+  fi
+  local now=$EPOCHSECONDS shown=0 enabled=0
+  local row id on kind targets cooldown chance snooze tags hint
+  local -a out
+  for row in "${rows[@]}"; do
+    local -a F; F=("${(@ps:\t:)row}")
+    id=$F[1] on=$F[2] kind=$F[3] targets=$F[4] cooldown=$F[5] chance=$F[6] snooze=$F[7] tags=$F[8] hint=$F[9]
+    [[ $on == 1 ]] && (( enabled++ ))
+    if [[ -n $filter ]]; then
+      [[ $targets == *$filter* || $hint == *$filter* || $tags == *$filter* || $id == $filter ]] || continue
+    fi
+    (( shown++ ))
+    if (( porcelain )); then
+      print -r -- "$row"
+      continue
+    fi
+    local mark="${C_GREEN}●${C_OFF}"
+    [[ $on != 1 ]] && mark="${C_DIM}○${C_OFF}"
+    (( snooze > now )) && mark="${C_YEL}◐${C_OFF}"
+    local extras=""
+    (( cooldown > 0 )) && extras+=" ${C_DIM}⏱$(_secs_to_human $cooldown)${C_OFF}"
+    (( chance < 100 )) && extras+=" ${C_DIM}🎲${chance}%${C_OFF}"
+    (( snooze > now )) && extras+=" ${C_YEL}zzz $(_secs_to_human $(( snooze - now )))${C_OFF}"
+    [[ $tags != - ]] && extras+=" ${C_DIM}[$tags]${C_OFF}"
+    local line="${C_DIM}${id}${C_OFF}  ${mark}  ${C_CYAN}$(_when_desc $kind "$targets")${C_OFF}  ${hint}${extras}"
+    if (( tui_lines )); then
+      print -r -- "${id}	${line}"
+    else
+      out+=("$line")
+    fi
+  done
+  (( porcelain || tui_lines )) && return 0
+  print -r -- "${C_PINK}${C_BOLD}psst${C_OFF} ${C_DIM}· $shown shown / $#rows hints ($enabled on)${C_OFF}"
+  print -rl -- "${out[@]}"
+}
+
+psst_cmd_show() {
+  [[ -n $1 ]] || die "usage: psst show <id>"
+  local -a rows; _read_rows
+  local REPLY; _row_index "$1"; local i=$REPLY
+  local -a F; F=("${(@ps:\t:)rows[$i]}")
+  local now=$EPOCHSECONDS
+  print -r -- "${C_BOLD}id${C_OFF}        $F[1]"
+  print -r -- "${C_BOLD}enabled${C_OFF}   $([[ $F[2] == 1 ]] && print -n yes || print -n no)"
+  print -r -- "${C_BOLD}fires on${C_OFF}  $(_when_desc $F[3] "$F[4]")"
+  print -r -- "${C_BOLD}cooldown${C_OFF}  $([[ $F[5] == 0 ]] && print -n "none" || _secs_to_human $F[5])"
+  print -r -- "${C_BOLD}chance${C_OFF}    $F[6]%"
+  if (( F[7] > now )); then
+    print -r -- "${C_BOLD}snoozed${C_OFF}   for another $(_secs_to_human $(( F[7] - now )))"
+  else
+    print -r -- "${C_BOLD}snoozed${C_OFF}   no"
+  fi
+  print -r -- "${C_BOLD}tags${C_OFF}      $F[8]"
+  print -r -- "${C_BOLD}hint${C_OFF}      $F[9]"
+  print
+  PSST_FORCE=1 _psst_emit "$F[9]"
+}
+
+psst_cmd_rm() {
+  (( $# )) || die "usage: psst rm <id...> | --tag <tag> | --all"
+  local -a rows; _read_rows
+  local before=$#rows
+  case $1 in
+    --all)
+      rows=()
+      ;;
+    --tag)
+      [[ -n $2 ]] || die "usage: psst rm --tag <tag>"
+      local -a keep; local r
+      for r in "${rows[@]}"; do
+        local -a F; F=("${(@ps:\t:)r}")
+        [[ ",$F[8]," == *",$2,"* ]] || keep+=("$r")
+      done
+      rows=("${keep[@]}")
+      ;;
+    *)
+      local id REPLY
+      for id in "$@"; do
+        _row_index "$id"
+        rows[$REPLY]=()
+      done
+      ;;
+  esac
+  _save_rows
+  ok "removed $(( before - $#rows )) hint(s)"
+}
+
+_set_field() { # id field_index value
+  local -a rows; _read_rows
+  local REPLY; _row_index "$1"; local i=$REPLY
+  local -a F; F=("${(@ps:\t:)rows[$i]}")
+  F[$2]=$3
+  rows[$i]=${(pj:\t:)F}
+  _save_rows
+}
+
+psst_cmd_toggle() {
+  [[ -n $1 ]] || die "usage: psst toggle <id...>"
+  local id REPLY
+  for id in "$@"; do
+    local -a rows; _read_rows
+    _row_index "$id"
+    local -a F; F=("${(@ps:\t:)rows[$REPLY]}")
+    local new=1; [[ $F[2] == 1 ]] && new=0
+    _set_field "$id" 2 $new
+    ok "$id is now $([[ $new == 1 ]] && print -n on || print -n off)"
+  done
+}
+
+psst_cmd_on() {
+  if (( ! $# )); then
+    command rm -f "$PSST_DIR/off"
+    ok "psst is on"
+    return
+  fi
+  local id
+  for id in "$@"; do _set_field "$id" 2 1; ok "$id on"; done
+}
+
+psst_cmd_off() {
+  if (( ! $# )); then
+    _ensure_store
+    : > "$PSST_DIR/off"
+    ok "psst is off (re-enable with: psst on)"
+    return
+  fi
+  local id
+  for id in "$@"; do _set_field "$id" 2 0; ok "$id off"; done
+}
+
+psst_cmd_snooze() {
+  [[ -n $1 ]] || die "usage: psst snooze <id> [duration, default 1d]"
+  local secs; secs=$(_dur_to_secs "${2:-1d}") || die "bad duration: $2 (try 30m, 2h, 7d)"
+  _set_field "$1" 7 $(( EPOCHSECONDS + secs ))
+  ok "$1 snoozed for $(_secs_to_human $secs)"
+}
+
+psst_cmd_wake() {
+  [[ -n $1 ]] || die "usage: psst wake <id>"
+  _set_field "$1" 7 0
+  ok "$1 is awake"
+}
+
+psst_cmd_done() {
+  [[ -n $1 ]] || die "usage: psst done <id>   (marks a hint as learned → disabled)"
+  local -a rows; _read_rows
+  local REPLY; _row_index "$1"; local i=$REPLY
+  local -a F; F=("${(@ps:\t:)rows[$i]}")
+  F[2]=0
+  [[ ",$F[8]," == *,learned,* ]] || F[8]=$([[ $F[8] == - ]] && print -n learned || print -n "$F[8],learned")
+  rows[$i]=${(pj:\t:)F}
+  _save_rows
+  ok "nice — '$F[9]' marked as learned 🎓 (kept, disabled; revive with: psst on $F[1])"
+}
+
+psst_cmd_edit() {
+  _ensure_store
+  ${=${VISUAL:-${EDITOR:-vi}}} "$PSST_HINTS"
+}
+
+psst_cmd_find() { psst_cmd_list "$@" }
+
+psst_cmd_try() {
+  (( $# )) || die "usage: psst try <command line...>"
+  local line="$*"
+  _psst_load
+  local -a reply
+  _psst_match "$line" ""
+  if (( ! $#reply )); then
+    note "no hints match: $line"
+    return 0
+  fi
+  local now=$EPOCHSECONDS rec
+  print -r -- "${C_PINK}${C_BOLD}psst${C_OFF} ${C_DIM}· $#reply hint(s) match:${C_OFF} $line"
+  for rec in "${reply[@]}"; do
+    local -a f; f=("${(@ps:\x1f:)rec}")   # id cooldown chance until dir hint
+    local why=""
+    (( f[4] > now )) && why+=" ${C_YEL}(snoozed)${C_OFF}"
+    if [[ $f[5] != - ]]; then
+      [[ $PWD == ${~f[5]}* ]] || why+=" ${C_YEL}(only in $f[5])${C_OFF}"
+    fi
+    (( f[3] < 100 )) && why+=" ${C_DIM}(${f[3]}% chance)${C_OFF}"
+    print -r -- "  ${C_DIM}$f[1]${C_OFF}  $f[6]$why"
+  done
+}
+
+psst_cmd_pack() {
+  local sub=${1:-list}; shift 2>/dev/null
+  local packdir="$PSST_ROOT/packs"
+  case $sub in
+    list)
+      print -r -- "${C_PINK}${C_BOLD}psst packs${C_OFF} ${C_DIM}(install with: psst pack install <name>)${C_OFF}"
+      local -a rows; _read_rows
+      local p name count installed n
+      for p in "$packdir"/*.tsv(N); do
+        name=${p:t:r}
+        count=$(grep -Evc '^#|^$' "$p")
+        installed=""
+        n=${#${(M)rows:#*pack:${name}*}}
+        (( n )) && installed=" ${C_GREEN}✓ installed ($n hints)${C_OFF}"
+        print -r -- "  ${C_CYAN}${name}${C_OFF} ${C_DIM}($count hints)${C_OFF}$installed"
+      done
+      ;;
+    install)
+      (( $# )) || die "usage: psst pack install <name|path> ..."
+      local src file
+      for src in "$@"; do
+        if [[ -f $src ]]; then file=$src
+        elif [[ -f $packdir/$src.tsv ]]; then file=$packdir/$src.tsv
+        else die "no pack '$src' (see: psst pack list)"
+        fi
+        local name=${file:t:r} added=0 skipped=0
+        local -a rows; _read_rows
+        # pack rows: kind  targets  cooldown  chance  hint
+        local kind targets cooldown chance hint r dupe REPLY
+        while IFS=$'\t' read -r kind targets cooldown chance hint || [[ -n $kind ]]; do
+          [[ -z $kind || $kind == \#* ]] && continue
+          dupe=0
+          for r in "${rows[@]}"; do
+            local -a F; F=("${(@ps:\t:)r}")
+            [[ $F[3] == $kind && $F[4] == $targets && $F[9] == $hint ]] && { dupe=1; break }
+          done
+          (( dupe )) && { (( skipped++ )); continue }
+          _gen_id
+          rows+=("$REPLY	1	${kind}	${targets}	${cooldown:-0}	${chance:-100}	0	pack:${name}	${hint}")
+          (( added++ ))
+        done < "$file"
+        _save_rows
+        ok "pack ${C_CYAN}${name}${C_OFF}: $added added$( (( skipped )) && print -n ", $skipped already present" )"
+      done
+      ;;
+    remove|rm)
+      (( $# )) || die "usage: psst pack remove <name>"
+      psst_cmd_rm --tag "pack:$1"
+      ;;
+    *) die "usage: psst pack [list|install <name>|remove <name>]" ;;
+  esac
+}
+
+psst_cmd_export() {
+  [[ -r $PSST_HINTS ]] || die "nothing to export"
+  if [[ -n $1 ]]; then
+    command cp "$PSST_HINTS" "$1" && ok "exported to $1"
+  else
+    command cat "$PSST_HINTS"
+  fi
+}
+
+psst_cmd_import() {
+  [[ -r $1 ]] || die "usage: psst import <file.tsv>"
+  local -a rows; _read_rows
+  local line added=0 bad=0 REPLY
+  local -A used
+  local r
+  for r in "${rows[@]}"; do used[${r%%	*}]=1; done
+  while IFS= read -r line || [[ -n $line ]]; do
+    [[ -z $line || $line == \#* ]] && continue
+    local -a F; F=("${(@ps:\t:)line}")
+    if (( $#F < 9 )); then (( bad++ )); continue; fi
+    (( $#F > 9 )) && F=("${(@)F[1,8]}" "${(pj:\t:)F[9,-1]}")
+    if [[ -n ${used[$F[1]]} ]]; then
+      _gen_id
+      F[1]=$REPLY
+    fi
+    used[$F[1]]=1
+    rows+=("${(pj:\t:)F}")
+    (( added++ ))
+  done < "$1"
+  _save_rows
+  ok "imported $added hint(s)$( (( bad )) && print -n " ${C_YEL}($bad malformed rows skipped)${C_OFF}" )"
+}
+
+psst_cmd_stats() {
+  local log="$PSST_STATE_DIR/shown.log"
+  if [[ $1 == --reset ]]; then
+    command rm -f "$log"
+    ok "stats reset"
+    return
+  fi
+  [[ -s $log ]] || { note "no hints shown yet"; return 0 }
+  local -A counts lastts hints
+  local ts id
+  while IFS=$'\t' read -r ts id; do
+    (( counts[$id]++ ))
+    lastts[$id]=$ts
+  done < "$log"
+  local -a rows; _read_rows
+  local r
+  for r in "${rows[@]}"; do
+    local -a F; F=("${(@ps:\t:)r}")
+    hints[$F[1]]=$F[9]
+  done
+  print -r -- "${C_PINK}${C_BOLD}psst stats${C_OFF} ${C_DIM}· times each hint fired${C_OFF}"
+  local -a lines
+  for id in ${(k)counts}; do
+    lines+=("${(l:6:)counts[$id]}  ${C_DIM}${id}${C_OFF}  ${hints[$id]:-${C_DIM}(deleted)${C_OFF}}")
+  done
+  print -rl -- "${(On)lines[@]}"
+}
+
+psst_cmd_demo() {
+  print -r -- "${C_DIM}this is how hints look (customize in $PSST_DIR/config.zsh):${C_OFF}"
+  PSST_FORCE=1 _psst_emit "Use fresh for a more modern file editor! :D"
+  PSST_FORCE=1 PSST_ICON="🌱" PSST_PREFIX="tip" _psst_emit "icons and prefix are configurable"
+}
+
+psst_cmd_status() {
+  local state="${C_GREEN}on${C_OFF}"
+  [[ -e $PSST_DIR/off ]] && state="${C_RED}off${C_OFF}"
+  local -a rows; _read_rows
+  local enabled=0 r
+  for r in "${rows[@]}"; do
+    local -a F; F=("${(@ps:\t:)r}")
+    [[ $F[2] == 1 ]] && (( enabled++ ))
+  done
+  print -r -- "${C_PINK}${C_BOLD}psst${C_OFF} v$PSST_VERSION is $state ${C_DIM}· $enabled/$#rows hints enabled${C_OFF}"
+  print -r -- "${C_DIM}hints:  $PSST_HINTS${C_OFF}"
+  print -r -- "${C_DIM}plugin: $PSST_ROOT${C_OFF}"
+}
+
+psst_cmd_doctor() {
+  local fails=0
+  _check() { # label ok-bool detail
+    if (( $2 )); then print -r -- "${C_GREEN}✓${C_OFF} $1"
+    else print -r -- "${C_RED}✗${C_OFF} $1 ${C_DIM}— $3${C_OFF}"; (( fails++ ))
+    fi
+  }
+  autoload -Uz is-at-least
+  is-at-least 5.3 $ZSH_VERSION; _check "zsh $ZSH_VERSION (>= 5.3)" $(( ! $? )) "upgrade zsh"
+  [[ -r $PSST_HINTS ]]; _check "hints file readable" $(( ! $? )) "run any 'psst add' to create it"
+  local -a rows; _read_rows
+  local badrows=0 r
+  for r in "${rows[@]}"; do
+    local -a F; F=("${(@ps:\t:)r}")
+    (( $#F != 9 )) && (( badrows++ ))
+  done
+  _check "all $#rows rows well-formed (9 tab-separated columns)" $(( badrows == 0 )) "$badrows bad rows — fix with: psst edit"
+  local hooked=0
+  grep -qs "psst" ~/.zshrc && hooked=1
+  _check "wired into ~/.zshrc" $hooked "add: source $PSST_ROOT/psst.plugin.zsh"
+  [[ ! -e $PSST_DIR/off ]]; _check "globally enabled" $(( ! $? )) "run: psst on"
+  (( $+commands[fzf] )); _check "fzf available (for: psst tui)" $(( ! $? )) "brew install fzf (optional)"
+  local log="$PSST_STATE_DIR/shown.log"
+  if [[ -f $log ]]; then
+    local -a st; zstat -A st +size -- "$log" 2>/dev/null
+    _check "stats log size ${st[1]:-0}B" $(( ${st[1]:-0} < 1048576 )) "trim with: psst stats --reset"
+  fi
+  (( fails )) && print -r -- "${C_YEL}$fails issue(s) found${C_OFF}" || ok "all good"
+  return $fails
+}
+
+psst_cmd_tui() {
+  (( $+commands[fzf] )) || die "psst tui needs fzf (brew install fzf) — meanwhile: psst list"
+  local out
+  out=$("$SCRIPT" list --tui-lines | fzf --ansi --delimiter=$'\t' --with-nth=2 \
+    --prompt="psst ❯ " \
+    --header="enter: details · ctrl-t: toggle · ctrl-x: delete · ctrl-z: snooze 1d · ctrl-w: wake · esc: quit" \
+    --preview="$SCRIPT show {1}" --preview-window=down,9,wrap \
+    --bind="ctrl-t:execute-silent($SCRIPT toggle {1})+reload($SCRIPT list --tui-lines)" \
+    --bind="ctrl-x:execute-silent($SCRIPT rm {1})+reload($SCRIPT list --tui-lines)" \
+    --bind="ctrl-z:execute-silent($SCRIPT snooze {1} 1d)+reload($SCRIPT list --tui-lines)" \
+    --bind="ctrl-w:execute-silent($SCRIPT wake {1})+reload($SCRIPT list --tui-lines)")
+  [[ -n $out ]] && "$SCRIPT" show "${out%%	*}"
+}
+
+psst_cmd_uninstall() {
+  local purge=0
+  [[ $1 == --purge ]] && purge=1
+  local zshrc=~/.zshrc
+  if grep -qs '# >>> psst >>>' "$zshrc"; then
+    command cp "$zshrc" "$zshrc.psst-backup"
+    command sed -i '' '/# >>> psst >>>/,/# <<< psst <<</d' "$zshrc" 2>/dev/null \
+      || command sed -i '/# >>> psst >>>/,/# <<< psst <<</d' "$zshrc"
+    ok "removed psst block from ~/.zshrc (backup: ~/.zshrc.psst-backup)"
+  elif grep -qs 'psst.plugin.zsh\|fire17/psst' "$zshrc"; then
+    print -r -- "${C_YEL}!${C_OFF} psst is loaded from ~/.zshrc outside a psst block — remove that line manually"
+  else
+    note "no psst lines found in ~/.zshrc (loaded via a plugin manager? remove it there)"
+  fi
+  if (( purge )); then
+    command rm -rf "$PSST_DIR" "$PSST_STATE_DIR"
+    ok "purged hints and stats"
+  else
+    note "your hints are kept at $PSST_HINTS (add --purge to remove them too)"
+  fi
+  note "open a new shell for this to take effect 👋"
+}
+
+psst_cmd_version() { print -r -- "psst $PSST_VERSION" }
+
+psst_cmd_help() {
+  print -r -- "${C_PINK}${C_BOLD}psst${C_OFF} — gentle hints for your shell, right before you need them.
+
+${C_BOLD}add hints${C_OFF}
+  psst add <cmds> <hint...>            hint before command(s); comma-separate: nano,pico,vi
+  psst add --pat '<glob>' <hint...>    hint when the full command line matches a zsh glob
+  psst add --any <hint...>             hint on any command (pair with --chance/--cooldown)
+    flags: --cooldown 2h  --chance 25  --tag work  --in ~/dir
+
+${C_BOLD}browse${C_OFF}
+  psst list [text]      list hints (filter by command, text, or tag)
+  psst tui              interactive manager (fzf)
+  psst show <id>        full details of one hint
+  psst try <cmdline>    which hints would fire for a command line?
+  psst stats            how often each hint fired
+
+${C_BOLD}manage${C_OFF}
+  psst rm <id...>              delete (also: --tag <tag>, --all)
+  psst on / off [id]           enable/disable everything, or one hint
+  psst toggle <id>             flip one hint
+  psst snooze <id> [7d]        mute for a while     psst wake <id>  unmute
+  psst done <id>               'learned it' — keep but stop showing
+  psst edit                    open hints file in \$EDITOR
+
+${C_BOLD}packs & sharing${C_OFF}
+  psst pack list / install <name> / remove <name>
+  psst export [file] / import <file>
+
+${C_BOLD}setup${C_OFF}
+  psst status / doctor / demo / uninstall [--purge] / version
+
+${C_DIM}session mute: PSST_QUIET=1 · config: $PSST_DIR/config.zsh · data: $PSST_HINTS${C_OFF}"
+}
+
+# ---------- dispatch ----------
+main() {
+  local cmd=${1:-help}
+  (( $# )) && shift
+  case $cmd in
+    -h|--help) cmd=help ;;
+    -v|--version) cmd=version ;;
+  esac
+  local fn="psst_cmd_${cmd//-/_}"
+  if typeset -f -- "$fn" > /dev/null; then
+    "$fn" "$@"
+  else
+    die "unknown command '$cmd' — see: psst help"
+  fi
+}
+
+main "$@"

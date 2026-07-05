@@ -1,0 +1,16 @@
+# psst pack: modern-unix — friendly reminders that nicer tools exist
+# columns: kind	targets	cooldown	chance	hint
+cmd	cat	300	100	bat is cat with wings — syntax highlighting & line numbers (brew install bat)
+cmd	ls	600	100	eza is a modern ls — colors, git status, tree view (brew install eza)
+cmd	grep	300	100	ripgrep (rg) is grep at ludicrous speed, gitignore-aware (brew install ripgrep)
+cmd	find	300	100	fd is find with sane syntax: fd pattern (brew install fd)
+cmd	top	300	100	btop is top from the future (brew install btop)
+cmd	du	300	100	dust shows disk usage you can actually read (brew install dust)
+cmd	df	300	100	duf makes df pretty and readable (brew install duf)
+cmd	sed	300	100	sd is sed for humans: sd 'old' 'new' file (brew install sd)
+cmd	man	300	100	tldr gives examples instead of walls of text (brew install tlrc)
+cmd	diff	300	100	delta makes diffs beautiful (brew install git-delta)
+cmd	ps	300	100	procs is a modern ps with colors & search (brew install procs)
+cmd	dig	300	100	doggo is a friendlier dig (brew install doggo)
+cmd	nano,pico	300	100	micro is nano evolved — mouse, tabs, syntax colors (brew install micro)
+cmd	cd	3600	20	zoxide learns your dirs — 'z proj' jumps from anywhere (brew install zoxide)
