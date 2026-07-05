@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.2.0 — 2026-07-06
+
+- **breather pause**: the first time a hint fires for a command each day, the command is
+  held for 1s so the hint gets read (once per base command, resets daily, shared across
+  sessions; forkless `zselect` sleep). `psst pause on|off|status|<seconds>` controls it
+  globally; `PSST_PAUSE` per session
+- **already-in-use suppression**: `unless=<tool>` tags (and `psst add --unless <tool>`)
+  skip hints when the suggested tool is already installed/active; alias-redirect detection
+  suppresses hints on names your aliases already point elsewhere (`alias cat='bat'`)
+- pack format now carries a tags column (6 cols); bundled zoxide hint is `unless=zoxide`
+- `psst status` shows pause state; 20 new tests (68 total)
+
 ## v0.1.0 — 2026-07-06
 
 Initial release 💡

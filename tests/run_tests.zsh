@@ -13,6 +13,7 @@ export PSST_HINTS=$PSST_DIR/hints.tsv
 export PSST_STATE_DIR=$SANDBOX/state
 export PSST_FORCE=1          # bypass tty check — tests capture stderr
 export NO_COLOR=1
+export PSST_PAUSE=0          # keep tests instant; pause has its own timed section
 unset PSST_QUIET PSST_MIN_GAP PSST_STYLE PSST_ICON PSST_PREFIX
 
 source "$ROOT/lib/core.zsh"
@@ -217,6 +218,69 @@ out=$("$CLI" doctor); rc=$?
 assert_contains "doctor flags malformed row" "$out" "✗"
 out=$(reset_store; hook "nano f")
 assert_empty "hook is silent with no store at all" "$out"
+
+print "— unless: skip hints for tools already present —"
+reset_store
+"$CLI" add --unless zsh cat "redundant hint" >/dev/null        # zsh is certainly present
+out=$(hook "cat f")
+assert_empty "unless=<installed tool> suppresses" "$out"
+reset_store
+"$CLI" add --unless not-a-real-tool-xyz cat "useful hint" >/dev/null
+out=$(hook "cat f")
+assert_contains "unless=<missing tool> fires" "$out" "useful hint"
+reset_store
+"$CLI" pack install modern-unix >/dev/null
+out=$("$CLI" list --porcelain)
+assert_contains "pack carries unless tag (zoxide)" "$out" "unless=zoxide"
+
+print "— alias-redirect suppression (already upgraded) —"
+reset_store
+"$CLI" add cat "use bat!" >/dev/null
+out=$(hook "cat f" "bat f")                    # alias cat='bat'
+assert_empty "typed name aliased to different cmd: suppressed" "$out"
+out=$(hook "cat f" "cat --color=auto f")       # alias to same cmd with flags
+assert_contains "alias to same command still fires" "$out" "use bat!"
+"$CLI" add bat "bat power tips exist" >/dev/null
+out=$(hook "cat f" "bat f")
+assert_contains "target command's own hints fire through the alias" "$out" "bat power"
+
+print "— pause: breather once per command per day —"
+reset_store
+"$CLI" add pausecmd,othercmd,stalecmd "read me first" >/dev/null
+typeset -F pt0 pt1
+pt0=$EPOCHREALTIME; out=$(PSST_PAUSE=1 hook "pausecmd a"); pt1=$EPOCHREALTIME
+assert_contains "hint shows with pause enabled" "$out" "read me first"
+if (( pt1 - pt0 >= 0.9 )); then pass "first run pauses ~1s"; else fail "first run did not pause" "$(( pt1 - pt0 ))s"; fi
+pt0=$EPOCHREALTIME; out=$(PSST_PAUSE=1 hook "pausecmd b"); pt1=$EPOCHREALTIME
+assert_contains "hint still shows on later runs" "$out" "read me first"
+if (( pt1 - pt0 < 0.6 )); then pass "same command: no second pause today"; else fail "paused again for same command" "$(( pt1 - pt0 ))s"; fi
+pt0=$EPOCHREALTIME; out=$(PSST_PAUSE=1 hook "pc x" "pausecmd x"); pt1=$EPOCHREALTIME
+if (( pt1 - pt0 < 0.6 )); then pass "alias of already-paused command: no pause"; else fail "alias re-paused" "$(( pt1 - pt0 ))s"; fi
+pt0=$EPOCHREALTIME; out=$(PSST_PAUSE=1 hook "othercmd x"); pt1=$EPOCHREALTIME
+if (( pt1 - pt0 >= 0.9 )); then pass "different command pauses"; else fail "different command did not pause" "$(( pt1 - pt0 ))s"; fi
+assert_contains "paused state persisted to disk" "$(<$PSST_STATE_DIR/paused.tsv)" "pausecmd"
+print -r -- $'2020-01-01\tstalecmd' > "$PSST_STATE_DIR/paused.tsv"
+pt0=$EPOCHREALTIME; out=$(PSST_PAUSE=1 hook "stalecmd x"); pt1=$EPOCHREALTIME
+if (( pt1 - pt0 >= 0.9 )); then pass "old-day entries reset daily"; else fail "stale entry suppressed today's pause" "$(( pt1 - pt0 ))s"; fi
+command rm -f "$PSST_STATE_DIR/paused.tsv"
+pt0=$EPOCHREALTIME; out=$(PSST_PAUSE=0 hook "othercmd x"); pt1=$EPOCHREALTIME
+if (( pt1 - pt0 < 0.5 )); then pass "PSST_PAUSE=0 disables pause"; else fail "paused despite PSST_PAUSE=0" "$(( pt1 - pt0 ))s"; fi
+"$CLI" pause off >/dev/null
+command rm -f "$PSST_STATE_DIR/paused.tsv"
+pt0=$EPOCHREALTIME; out=$(unset PSST_PAUSE; hook "othercmd x"); pt1=$EPOCHREALTIME
+if (( pt1 - pt0 < 0.5 )); then pass "psst pause off disables globally"; else fail "paused despite pause off" "$(( pt1 - pt0 ))s"; fi
+"$CLI" pause on >/dev/null
+command rm -f "$PSST_STATE_DIR/paused.tsv"
+pt0=$EPOCHREALTIME; out=$(unset PSST_PAUSE; hook "othercmd x"); pt1=$EPOCHREALTIME
+if (( pt1 - pt0 >= 0.9 )); then pass "psst pause on restores globally"; else fail "no pause after pause on" "$(( pt1 - pt0 ))s"; fi
+out=$("$CLI" pause status)
+assert_contains "pause status reports on" "$out" "on"
+"$CLI" pause 0.5 >/dev/null
+out=$("$CLI" pause status)
+assert_contains "pause accepts custom seconds" "$out" "0.5"
+"$CLI" pause off >/dev/null
+out=$("$CLI" pause status)
+assert_contains "pause status reports off" "$out" "off"
 
 print "— performance (hot path) —"
 reset_store

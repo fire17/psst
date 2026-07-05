@@ -4,7 +4,7 @@
 emulate -R zsh
 setopt extended_glob typeset_silent
 
-typeset -g PSST_VERSION="0.1.0"
+typeset -g PSST_VERSION="0.2.0"
 typeset -g SCRIPT=${0:A}
 typeset -g PSST_ROOT=${SCRIPT:h:h}
 source "$PSST_ROOT/lib/core.zsh"
@@ -117,6 +117,7 @@ psst_cmd_add() {
       --cooldown|-c) cooldown=$(_dur_to_secs "$2") || die "bad duration: $2"; shift 2 ;;
       --chance|-p)   chance=$2; [[ $chance == <-> ]] && (( chance >= 1 && chance <= 100 )) || die "chance must be 1-100"; shift 2 ;;
       --tag|-t)      tags+=("$2"); shift 2 ;;
+      --unless|-u)   tags+=("unless=$2"); shift 2 ;;
       --in)          dir=${2:A}; shift 2 ;;
       --id)          id=$2; shift 2 ;;
       --)            shift; break ;;
@@ -375,9 +376,9 @@ psst_cmd_pack() {
         fi
         local name=${file:t:r} added=0 skipped=0
         local -a rows; _read_rows
-        # pack rows: kind  targets  cooldown  chance  hint
-        local kind targets cooldown chance hint r dupe REPLY
-        while IFS=$'\t' read -r kind targets cooldown chance hint || [[ -n $kind ]]; do
+        # pack rows: kind  targets  cooldown  chance  tags  hint
+        local kind targets cooldown chance ptags hint r dupe tagstr REPLY
+        while IFS=$'\t' read -r kind targets cooldown chance ptags hint || [[ -n $kind ]]; do
           [[ -z $kind || $kind == \#* ]] && continue
           dupe=0
           for r in "${rows[@]}"; do
@@ -385,8 +386,10 @@ psst_cmd_pack() {
             [[ $F[3] == $kind && $F[4] == $targets && $F[9] == $hint ]] && { dupe=1; break }
           done
           (( dupe )) && { (( skipped++ )); continue }
+          tagstr="pack:${name}"
+          [[ -n $ptags && $ptags != - ]] && tagstr+=",$ptags"
           _gen_id
-          rows+=("$REPLY	1	${kind}	${targets}	${cooldown:-0}	${chance:-100}	0	pack:${name}	${hint}")
+          rows+=("$REPLY	1	${kind}	${targets}	${cooldown:-0}	${chance:-100}	0	${tagstr}	${hint}")
           (( added++ ))
         done < "$file"
         _save_rows
@@ -462,6 +465,57 @@ psst_cmd_stats() {
   print -rl -- "${(On)lines[@]}"
 }
 
+# resolve the effective pause seconds the way the hook does (file > default;
+# the CLI ignores session-local $PSST_PAUSE on purpose — this is the global view)
+_pause_current() {
+  if [[ -r $PSST_DIR/pause ]]; then REPLY=$(<$PSST_DIR/pause); else REPLY=1; fi
+  [[ $REPLY == (<->|<->.<->|.<->) ]] || REPLY=1
+}
+
+psst_cmd_pause() {
+  local f="$PSST_DIR/pause" REPLY
+  case ${1:-status} in
+    status)
+      _pause_current
+      if (( REPLY > 0 )); then
+        print -r -- "${C_PINK}${C_BOLD}psst pause${C_OFF} is ${C_GREEN}on${C_OFF} — ${REPLY}s before the first hint-ed run of each command, resets daily"
+      else
+        print -r -- "${C_PINK}${C_BOLD}psst pause${C_OFF} is ${C_RED}off${C_OFF}"
+      fi
+      # show + prune today's paused set
+      local pfile="$PSST_STATE_DIR/paused.tsv" today
+      strftime -s today '%Y-%m-%d' $EPOCHSECONDS
+      if [[ -r $pfile ]]; then
+        local -a keep todays
+        local d c
+        while IFS=$'\t' read -r d c || [[ -n $d ]]; do
+          [[ $d == "$today" ]] && { keep+=("$d	$c"); todays+=("$c") }
+        done < "$pfile"
+        local tmp="$pfile.tmp.$$"
+        { (( $#keep == 0 )) || print -rl -- "${keep[@]}" } > "$tmp" && command mv -f "$tmp" "$pfile"
+        (( $#todays )) && print -r -- "${C_DIM}already paused today: ${(j:, :)todays}${C_OFF}"
+      fi
+      ;;
+    on)
+      command rm -f "$f"
+      ok "pause on — 1s before the first hint-ed run of each command, resets daily"
+      ;;
+    off)
+      _ensure_store
+      print -r -- 0 > "$f"
+      ok "pause off — hints still show, commands start instantly"
+      ;;
+    (<->|<->.<->|.<->))
+      _ensure_store
+      print -r -- "$1" > "$f"
+      ok "pause set to ${1}s (per command, once a day)"
+      ;;
+    *)
+      die "usage: psst pause [status|on|off|<seconds>]"
+      ;;
+  esac
+}
+
 psst_cmd_demo() {
   print -r -- "${C_DIM}this is how hints look (customize in $PSST_DIR/config.zsh):${C_OFF}"
   PSST_FORCE=1 _psst_emit "Use fresh for a more modern file editor! :D"
@@ -477,7 +531,10 @@ psst_cmd_status() {
     local -a F; F=("${(@ps:\t:)r}")
     [[ $F[2] == 1 ]] && (( enabled++ ))
   done
-  print -r -- "${C_PINK}${C_BOLD}psst${C_OFF} v$PSST_VERSION is $state ${C_DIM}· $enabled/$#rows hints enabled${C_OFF}"
+  local REPLY; _pause_current
+  local pstate="pause ${REPLY}s"
+  (( REPLY > 0 )) || pstate="pause off"
+  print -r -- "${C_PINK}${C_BOLD}psst${C_OFF} v$PSST_VERSION is $state ${C_DIM}· $enabled/$#rows hints enabled · $pstate${C_OFF}"
   print -r -- "${C_DIM}hints:  $PSST_HINTS${C_OFF}"
   print -r -- "${C_DIM}plugin: $PSST_ROOT${C_OFF}"
 }
@@ -560,6 +617,7 @@ ${C_BOLD}add hints${C_OFF}
   psst add --pat '<glob>' <hint...>    hint when the full command line matches a zsh glob
   psst add --any <hint...>             hint on any command (pair with --chance/--cooldown)
     flags: --cooldown 2h  --chance 25  --tag work  --in ~/dir
+           --unless zoxide   (skip the hint if that tool is already installed/active)
 
 ${C_BOLD}browse${C_OFF}
   psst list [text]      list hints (filter by command, text, or tag)
@@ -570,7 +628,9 @@ ${C_BOLD}browse${C_OFF}
 
 ${C_BOLD}manage${C_OFF}
   psst rm <id...>              delete (also: --tag <tag>, --all)
-  psst on / off [id]           enable/disable everything, or one hint
+  psst on / off [id]           enable/disable ALL of psst globally, or one hint
+  psst pause [on|off|<secs>]   1s breather before the first hint-ed run of a
+                               command (once per command, resets daily)
   psst toggle <id>             flip one hint
   psst snooze <id> [7d]        mute for a while     psst wake <id>  unmute
   psst done <id>               'learned it' — keep but stop showing

@@ -1,9 +1,9 @@
 # psst pack: git — habits worth forming
-# columns: kind	targets	cooldown	chance	hint
-pat	git push *(-f|--force)(| *)	0	100	--force-with-lease refuses to clobber teammates' pushes 🛟
-pat	git checkout -b *	1800	100	modern git: git switch -c <branch>
-pat	git checkout [!-]*	1800	100	modern git: git switch <branch> · git restore <file>
-pat	git log	1800	100	pretty: git log --oneline --graph --decorate
-pat	git stash	1800	100	name it, find it later: git stash push -m "wip: thing"
-pat	git pull	3600	100	linear history: git pull --rebase (set once: git config pull.rebase true)
-pat	git reset --hard*	0	100	⚠️ this throws away uncommitted work — git stash keeps it recoverable
+# columns: kind	targets	cooldown	chance	tags	hint
+pat	git push *(-f|--force)(| *)	0	100	-	--force-with-lease refuses to clobber teammates' pushes 🛟
+pat	git checkout -b *	1800	100	-	modern git: git switch -c <branch>
+pat	git checkout [!-]*	1800	100	-	modern git: git switch <branch> · git restore <file>
+pat	git log	1800	100	-	pretty: git log --oneline --graph --decorate
+pat	git stash	1800	100	-	name it, find it later: git stash push -m "wip: thing"
+pat	git pull	3600	100	-	linear history: git pull --rebase (set once: git config pull.rebase true)
+pat	git reset --hard*	0	100	-	⚠️ this throws away uncommitted work — git stash keeps it recoverable

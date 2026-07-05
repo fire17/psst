@@ -70,14 +70,35 @@ psst add --in ~/work/big-app npm "this repo uses pnpm!"
 # rate control per hint
 psst add --cooldown 30m cat "bat is cat with wings"
 
+# suppress a hint wherever the suggested tool is already installed/active
+psst add --unless zoxide cd "zoxide learns your dirs — z proj jumps anywhere"
+
 # lifecycle
 psst list            # pretty overview          psst tui        # fzf manager
 psst snooze 3fa2 7d  # mute for a week          psst wake 3fa2
-psst done 3fa2       # learned it — archive     psst on / off   # the whole thing
+psst done 3fa2       # learned it — archive     psst on / off   # ALL of psst, globally
+psst pause off       # kill the 1s breather     psst pause 2    # or make it longer
 psst try "git push -f"   # debug: which hints would fire?
 psst stats           # what actually fires, how often
 psst export team.tsv / import team.tsv   # share hint sets
 ```
+
+### The breather ⏸️
+
+The first time a hint fires for a command each day, psst holds the command for **1 second**
+so you actually read the hint before output scrolls it away (and get a beat to Ctrl-C on the
+safety ones). Every later run that day starts instantly — the pause is once per base command,
+resets daily, shared across all your sessions. `psst pause off|on|<seconds>` controls it
+globally, `PSST_PAUSE=0` per session.
+
+### Already using the better tool? psst stays quiet
+
+- **`unless=` hints** skip themselves when the suggested tool is already present — installed
+  binary, shell function, or alias. The bundled zoxide hint won't nag you if zoxide is
+  already wrapping your `cd`.
+- **Alias-redirect detection**: if you type `cat` but your `alias cat='bat'` already redirects
+  it, hints registered on `cat` are suppressed — you've clearly upgraded. (Hints for `bat`
+  itself still work through the alias.)
 
 Session controls: `PSST_QUIET=1` mutes the current shell; `PSST_MIN_GAP=30` shows at most one
 hint per 30s globally.
@@ -93,7 +114,7 @@ Curated starter sets, one command away (`psst pack list`):
 | `safety` | a tap on the shoulder before `rm -rf`, `chmod 777`, `dd of=/dev/…`, `curl \| sh` |
 
 `psst pack install modern-unix git safety` · remove anytime with `psst pack remove <name>`.
-A pack is just a 5-column TSV — make your own and `psst pack install ./team-pack.tsv`.
+A pack is just a 6-column TSV — make your own and `psst pack install ./team-pack.tsv`.
 
 ## Seamless, really
 
@@ -118,6 +139,8 @@ PSST_STYLE=$'\e[1;36m'         # prefix style   (default: bold pink 213)
 PSST_BODY_STYLE=$'\e[0;36m'    # hint style
 PSST_MIN_GAP=0                 # min seconds between any two hints
 PSST_STATS=1                   # log fires for `psst stats` (0 to disable)
+PSST_PAUSE=1                   # first-hint-of-the-day breather, seconds (0 = off;
+                               # prefer `psst pause …` to change it everywhere at once)
 ```
 
 `psst doctor` checks your whole setup; `psst demo` previews styling.

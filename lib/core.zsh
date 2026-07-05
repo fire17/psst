@@ -18,6 +18,7 @@
 
 zmodload -F zsh/stat b:zstat 2>/dev/null
 zmodload -F zsh/files b:zf_mkdir 2>/dev/null
+zmodload -F zsh/zselect b:zselect 2>/dev/null
 zmodload zsh/datetime 2>/dev/null
 
 typeset -gA _psst_cmd_map     # command name -> $'\x1e'-joined records
@@ -26,6 +27,9 @@ typeset -ga _psst_any_list    # records
 typeset -gA _psst_last_shown  # hint id -> epoch last shown (this session)
 typeset -g  _psst_sig=""      # mtime:size:inode signature of the loaded hints file
 typeset -g  _psst_last_any=0  # epoch any hint was last shown (global gap)
+typeset -gA _psst_paused      # base command -> 1 if already paused today
+typeset -g  _psst_paused_day=""
+typeset -g  _psst_paused_sig=""
 
 # _psst_file_sig — sets REPLY to the hints file signature ("missing" if unreadable)
 _psst_file_sig() {
@@ -46,16 +50,24 @@ _psst_load() {
   _psst_sig=$REPLY
   [[ $_psst_sig == missing ]] && return 0
   local id on kind targets cooldown chance snooze tags hint
-  local rec t dir tag
+  local rec t dir tag u skip
   while IFS=$'\t' read -r id on kind targets cooldown chance snooze tags hint || [[ -n $id ]]; do
     [[ -z $id || $id == \#* ]] && continue
     [[ $on == 1 ]] || continue
-    dir="-"
-    if [[ $tags == *in=* ]]; then
+    dir="-" skip=0
+    if [[ $tags == *(in|unless)=* ]]; then
       for tag in ${(s:,:)tags}; do
         [[ $tag == in=* ]] && dir=${tag#in=}
+        if [[ $tag == unless=* ]]; then
+          # suppress the hint when the suggested tool is already present:
+          # a command in PATH, a shell function, or an alias (e.g. zoxide
+          # wrapping cd means typing cd IS using zoxide — nothing to teach)
+          u=${tag#unless=}
+          (( $+commands[$u] || $+functions[$u] || $+aliases[$u] )) && { skip=1; break }
+        fi
       done
     fi
+    (( skip )) && continue
     rec="${id}"$'\x1f'"${cooldown:-0}"$'\x1f'"${chance:-100}"$'\x1f'"${snooze:-0}"$'\x1f'"${dir}"$'\x1f'"${hint}"
     case $kind in
       cmd)
@@ -123,19 +135,25 @@ _psst_match() {
   [[ $expanded == "$typed" ]] && expanded=""
   reply=()
   local -A seen
-  local line rec pat entry
-  for line in "$typed" "$expanded"; do
-    [[ -z $line ]] && continue
-    _psst_cmd_word "$line"
-    [[ -z $REPLY ]] && continue
-    if [[ -n ${_psst_cmd_map[$REPLY]} ]]; then
-      for rec in "${(@ps:\x1e:)_psst_cmd_map[$REPLY]}"; do
-        [[ -n ${seen[${rec%%$'\x1f'*}]} ]] && continue
-        seen[${rec%%$'\x1f'*}]=1
-        reply+=("$rec")
-      done
-    fi
-  done
+  local rec pat entry tw="" ew=""
+  _psst_cmd_word "$typed"; tw=$REPLY
+  [[ -n $expanded ]] && { _psst_cmd_word "$expanded"; ew=$REPLY }
+  # If the typed name is an alias that redirects to a DIFFERENT command
+  # (alias cat='bat'), the user already upgraded — suppress hints registered
+  # on the typed name and only consider the real target's hints.
+  local w=""
+  if [[ -n $ew && -n $tw && $ew != "$tw" ]]; then
+    w=$ew
+  else
+    w=${tw:-$ew}
+  fi
+  if [[ -n $w && -n ${_psst_cmd_map[$w]} ]]; then
+    for rec in "${(@ps:\x1e:)_psst_cmd_map[$w]}"; do
+      [[ -n ${seen[${rec%%$'\x1f'*}]} ]] && continue
+      seen[${rec%%$'\x1f'*}]=1
+      reply+=("$rec")
+    done
+  fi
   for entry in "${_psst_pat_list[@]}"; do
     pat=${entry%%$'\x1f'*}
     rec=${entry#*$'\x1f'}
@@ -161,6 +179,64 @@ _psst_emit() {
   local prefix=${PSST_PREFIX:-psst}
   local reset=$'\e[0m'
   print -r -- "${style}${icon} ${prefix}${reset}${body} · ${1}${reset}" >&2
+}
+
+# _psst_pause_maybe <typed> <expanded> <now> — after a hint fires, hold the
+# command for a beat so the hint gets read before output scrolls it away.
+# Applies ONCE per base command per day (persisted across sessions in
+# $PSST_STATE_DIR/paused.tsv), resets daily. Duration resolution:
+# $PSST_PAUSE (session) > $PSST_DIR/pause file (global CLI toggle) > 1s.
+_psst_pause_maybe() {
+  emulate -L zsh
+  local now=$3
+  local pause=${PSST_PAUSE:-}
+  if [[ -z $pause ]]; then
+    if [[ -r $PSST_DIR/pause ]]; then pause=$(<$PSST_DIR/pause); else pause=1; fi
+  fi
+  [[ $pause == (<->|<->.<->|.<->) ]] || pause=1
+  (( pause > 0 )) || return 0
+
+  # base command = what the user is really running (alias-resolved)
+  local REPLY base
+  _psst_cmd_word "$1"; base=$REPLY
+  if [[ -n $2 && $2 != "$1" ]]; then
+    _psst_cmd_word "$2"
+    [[ -n $REPLY ]] && base=$REPLY
+  fi
+  [[ -n $base ]] || base="-"
+
+  # sync today's already-paused set (mtime-gated, shared across sessions)
+  local pfile="$PSST_STATE_DIR/paused.tsv" today psig="missing"
+  strftime -s today '%Y-%m-%d' $now 2>/dev/null || today=$(( now / 86400 ))
+  local -A pst
+  zstat -H pst -- "$pfile" 2>/dev/null && psig="${pst[mtime]}:${pst[size]}:${pst[inode]}"
+  if [[ $psig != "$_psst_paused_sig" || $today != "$_psst_paused_day" ]]; then
+    _psst_paused=()
+    _psst_paused_day=$today
+    _psst_paused_sig=$psig
+    if [[ $psig != missing ]]; then
+      local d c
+      while IFS=$'\t' read -r d c || [[ -n $d ]]; do
+        [[ $d == "$today" ]] && _psst_paused[$c]=1
+      done < "$pfile"
+    fi
+  fi
+  [[ -n ${_psst_paused[$base]} ]] && return 0
+
+  _psst_paused[$base]=1
+  if [[ ! -d $PSST_STATE_DIR ]]; then
+    zf_mkdir -p "$PSST_STATE_DIR" 2>/dev/null || command mkdir -p "$PSST_STATE_DIR" 2>/dev/null
+  fi
+  print -r -- "${today}"$'\t'"${base}" 2>/dev/null >> "$pfile"
+  local -i cs=$(( pause * 100 ))
+  if (( cs > 0 )); then
+    if (( $+builtins[zselect] )); then
+      zselect -t $cs
+    else
+      command sleep $pause
+    fi
+  fi
+  return 0
 }
 
 # The preexec hook. Receives (typed, single-line-expanded, full-expanded).
@@ -211,6 +287,7 @@ _psst_preexec() {
     _psst_emit "$f[6]"
     _psst_last_shown[$f[1]]=$now
     _psst_last_any=$now
+    _psst_pause_maybe "$1" "$3" $now
     if [[ ${PSST_STATS:-1} == 1 ]]; then
       if [[ ! -d $PSST_STATE_DIR ]]; then
         zf_mkdir -p "$PSST_STATE_DIR" 2>/dev/null || command mkdir -p "$PSST_STATE_DIR" 2>/dev/null
