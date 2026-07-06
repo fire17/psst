@@ -43,6 +43,24 @@ reset_store() {
   _psst_last_shown=() _psst_last_any=0 _psst_sig=""
 }
 
+# run a CLI call that must terminate on its own; REPLY=output, or "DEADLINE"
+run_with_deadline() { # <secs> <cmd...>
+  local secs=$1; shift
+  local outfile=$SANDBOX/deadline.out
+  "$@" > "$outfile" 2>&1 &
+  local pid=$! i
+  for i in {1..$(( secs * 20 ))}; do
+    kill -0 $pid 2>/dev/null || break
+    sleep 0.05
+  done
+  if kill -0 $pid 2>/dev/null; then
+    kill -9 $pid 2>/dev/null
+    REPLY="DEADLINE"
+  else
+    REPLY=$(<$outfile)
+  fi
+}
+
 print "— add & match —"
 reset_store
 "$CLI" add nano "Use fresh for a more modern file editor! :D" >/dev/null
@@ -305,6 +323,20 @@ assert_contains "psst <cmd> hide works" "$out" "hidden"
 "$CLI" nano show >/dev/null
 out=$("$CLI" list --full)
 assert_contains "flat view still available via --full" "$out" "first nano hint"
+
+print "— CLI robustness: dangling flags & ambiguous ids —"
+reset_store
+local REPLY
+run_with_deadline 3 "$CLI" add --tag
+assert_contains "dangling --tag dies fast (no infinite loop)" "$REPLY" "needs a value"
+run_with_deadline 3 "$CLI" add --unless
+assert_contains "dangling --unless dies fast" "$REPLY" "needs a value"
+run_with_deadline 3 "$CLI" nano add --cooldown
+assert_contains "scoped dangling flag dies fast" "$REPLY" "needs a value"
+"$CLI" add --id 1234 nano "numeric id hint" >/dev/null
+"$CLI" nano rm 1234 >/dev/null    # only 1 hint → 1234 out of ordinal range → falls back to id
+out=$("$CLI" list --porcelain)
+assert_empty "out-of-range number falls back to hint id" "$out"
 
 print "— pause: breather once per command per day —"
 reset_store

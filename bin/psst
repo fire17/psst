@@ -4,7 +4,7 @@
 emulate -R zsh
 setopt extended_glob typeset_silent
 
-typeset -g PSST_VERSION="0.3.0"
+typeset -g PSST_VERSION="0.3.1"
 typeset -g SCRIPT=${0:A}
 typeset -g PSST_ROOT=${SCRIPT:h:h}
 source "$PSST_ROOT/lib/core.zsh"
@@ -179,12 +179,19 @@ psst_cmd_add() {
     case $1 in
       --pat|-P)      kind=pat; shift ;;
       --any|-A)      kind=any; shift ;;
-      --cooldown|-c) cooldown=$(_dur_to_secs "$2") || die "bad duration: $2"; shift 2 ;;
-      --chance|-p)   chance=$2; [[ $chance == <-> ]] && (( chance >= 1 && chance <= 100 )) || die "chance must be 1-100"; shift 2 ;;
-      --tag|-t)      tags+=("$2"); shift 2 ;;
-      --unless|-u)   tags+=("unless=$2"); shift 2 ;;
-      --in)          dir=${2:A}; shift 2 ;;
-      --id)          id=$2; shift 2 ;;
+      --cooldown|--chance|--tag|--unless|--in|--id|-c|-p|-t|-u)
+        # value-taking flags: a dangling one must die here — a failed `shift 2`
+        # would leave $1 in place and spin the loop forever
+        (( $# >= 2 )) || die "$1 needs a value (see: psst help)"
+        case $1 in
+          --cooldown|-c) cooldown=$(_dur_to_secs "$2") || die "bad duration: $2" ;;
+          --chance|-p)   chance=$2; [[ $chance == <-> ]] && (( chance >= 1 && chance <= 100 )) || die "chance must be 1-100" ;;
+          --tag|-t)      tags+=("$2") ;;
+          --unless|-u)   tags+=("unless=$2") ;;
+          --in)          dir=${2:A} ;;
+          --id)          id=$2 ;;
+        esac
+        shift 2 ;;
       --)            shift; break ;;
       -*)            die "unknown flag: $1 (see: psst help)" ;;
       *)             break ;;
@@ -522,7 +529,7 @@ _scope_list() { # <base>
     note "(if you meant a psst command, see: psst help)"
     return 0
   fi
-  print -r -- "${C_PINK}${C_BOLD}psst · $base${C_OFF} ${C_DIM}$#match_idx hint(s)${C_OFF}$hid"
+  print -r -- "${C_PINK}${C_BOLD}psst · $base${C_OFF} ${C_DIM}— $#match_idx hint$( (( $#match_idx > 1 )) && print -n s )${C_OFF}$hid"
   local n=0 i now=$EPOCHSECONDS
   for i in "${match_idx[@]}"; do
     (( n++ ))
@@ -561,6 +568,7 @@ psst_scope() { # <base> [verb] [args...]
       while (( $# )); do
         case $1 in
           --cooldown|-c|--chance|-p|--tag|-t|--unless|-u|--in|--id)
+            (( $# >= 2 )) || die "$1 needs a value (see: psst help)"
             flags+=("$1" "$2"); shift 2 ;;
           --pat|-P|--any|-A)
             die "psst $base add takes plain hints — use 'psst add $1 …' for pattern/any hints" ;;
@@ -582,8 +590,9 @@ psst_scope() { # <base> [verb] [args...]
       local -a ids
       local sel
       for sel in "$@"; do
-        if [[ $sel == <-> ]]; then
-          (( sel >= 1 && sel <= $#match_idx )) || die "'$base' has no hint #$sel (see: psst $base list)"
+        # ordinals from `psst <cmd> list` win; anything else (incl. an
+        # out-of-range number that might be an all-digit id) is tried as an id
+        if [[ $sel == <-> ]] && (( sel >= 1 && sel <= $#match_idx )); then
           ids+=("${rows[$match_idx[$sel]]%%	*}")
         else
           ids+=("$sel")
@@ -850,7 +859,7 @@ psst_cmd_doctor() {
   done
   _check "all $#rows rows well-formed (9 tab-separated columns)" $(( badrows == 0 )) "$badrows bad rows — fix with: psst edit"
   local hooked=0
-  grep -qs "psst" ~/.zshrc && hooked=1
+  grep -qsE 'psst\.plugin\.zsh|(zinit|antidote|zplug).*psst' ~/.zshrc && hooked=1
   _check "wired into ~/.zshrc" $hooked "add: source $PSST_ROOT/psst.plugin.zsh"
   [[ ! -e $PSST_DIR/off ]]; _check "globally enabled" $(( ! $? )) "run: psst on"
   (( $+commands[fzf] )); _check "fzf available (for: psst tui)" $(( ! $? )) "brew install fzf (optional)"

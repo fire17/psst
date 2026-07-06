@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.3.1 — 2026-07-06
+
+- **fix**: a value-taking flag with no value (`psst add --tag`) looped forever — now dies
+  with a clear message (guarded in both the add parser and command-scoped add)
+- **fix**: `psst <cmd> rm <n>` with an out-of-range number now falls back to treating it
+  as a hint id (all-digit ids were unreachable)
+- `psst doctor` zshrc check tightened to real plugin wiring (was matching any "psst" text)
+- 4 regression tests with a run-deadline guard (92 total)
+
 ## v0.3.0 — 2026-07-06
 
 - **per-command mute**: `psst hide <cmd>` silences everything psst does for a base command
