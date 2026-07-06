@@ -4,7 +4,7 @@
 emulate -R zsh
 setopt extended_glob typeset_silent
 
-typeset -g PSST_VERSION="0.3.1"
+typeset -g PSST_VERSION="0.3.2"
 typeset -g SCRIPT=${0:A}
 typeset -g PSST_ROOT=${SCRIPT:h:h}
 source "$PSST_ROOT/lib/core.zsh"

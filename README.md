@@ -51,6 +51,56 @@ double-checks, or anything else ("psst · the deploy checklist is in NOTES.md").
 
 When a hint has done its job: `psst done <id>` — learned, archived, quiet. 🎓
 
+## What it feels like
+
+Everything below ships in the bundled packs (`psst pack install modern-unix git safety`) —
+one line, then your command runs exactly as typed:
+
+```
+$ cat config.yaml
+💡 psst · bat is cat with wings — syntax highlighting & line numbers (brew install bat)
+
+$ git push --force
+💡 psst · --force-with-lease refuses to clobber teammates' pushes 🛟
+
+$ sudo rm -rf ./build
+💡 psst · ⚠️ recursive force-delete — double-check that path
+
+$ git checkout -b feature/hints
+💡 psst · modern git: git switch -c <branch>
+
+$ man tar
+💡 psst · tldr gives examples instead of walls of text (brew install tlrc)
+
+$ git reset --hard
+💡 psst · ⚠️ this throws away uncommitted work — git stash keeps it recoverable
+
+$ top
+💡 psst · btop is top from the future (brew install btop)
+```
+
+…plus `ls`→eza, `grep`→ripgrep, `find`→fd, `du`→dust, `df`→duf, `sed`→sd, `diff`→delta,
+`ps`→procs, `dig`→doggo, `chmod 777`, `dd of=/dev/…`, `curl | sh`, `git pull/log/stash`,
+and `cd`→zoxide — which politely stays silent if zoxide already wraps your `cd`.
+
+## Add your own in seconds
+
+Any base command — real tools, your own scripts, aliases — one line, no config files,
+no shell reload. Every open terminal picks it up immediately:
+
+```sh
+psst add deploy "remember: staging first, then prod 🙏"
+psst add npm "this machine uses pnpm!"
+psst add ssh "prod boxes: tmux first, always"
+psst add vim,nvim,vi "your .vimrc lives in ~/dotfiles"       # one hint, many commands
+psst add docker remember --rm or stopped containers pile up  # quotes optional
+psst nano add "second nano tip — they rotate randomly"       # scoped form works too
+```
+
+That's the whole workflow: `psst add <command> <hint>`. Typos and regrets are cheap —
+`psst list` shows everything, `psst <cmd> rm <n>` removes by number, `psst hide <cmd>`
+mutes a command entirely.
+
 ## Everything it can do
 
 ```sh

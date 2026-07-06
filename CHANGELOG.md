@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.3.2 — 2026-07-06
+
+- docs: README "What it feels like" showcase (real output of the bundled packs) and
+  "Add your own in seconds" — custom hints for any base command, no reload needed
+
 ## v0.3.1 — 2026-07-06
 
 - **fix**: a value-taking flag with no value (`psst add --tag`) looped forever — now dies
