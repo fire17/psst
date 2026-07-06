@@ -22,7 +22,7 @@ Effort: **S** ≤ half a day · **M** a day or two · **L** a project.
 | 8 | **Anti-repeat rotation** — never show the same hint twice in a row when siblings exist | Random with replacement feels broken exactly when you add multiple hints | S |
 | 9 | **Adaptive decay** — the more a hint has fired, the less often it shows (log-scale), until `done` | Nagging kills goodwill; hints should fade as they teach | M |
 | 10 | **Auto-graduation 🎓** — if you start typing the *suggested* tool regularly, auto-`done` the hint and congratulate once | Closes the learning loop by itself; the product's soul, automated | M |
-| 11 | **`--confirm` hints** — safety-pack escalation: require Enter (or y) before the command runs, not just a 1s pause | Turns the safety pack into a real guardrail for `rm -rf` / `dd` / force-push | M |
+| 11 | ~~**`--confirm` hints** — safety-pack escalation~~ ✅ **shipped in v0.4.0 as the guard**: ⚠️→30s / ❗→60s Are-you-sure countdowns, Enter/Esc/timeout, `psst guard` | Turns the safety pack into a real guardrail for `rm -rf` / `dd` | ~~M~~ |
 | 12 | **bash & fish ports** — bash-preexec / fish `fish_preexec` event, same data files | Doubles the audience; the store format is already shell-agnostic | L |
 | 13 | **`psst config`** — get/set styling, gaps, pause defaults from the CLI (writes config.zsh) | Editing a config file is friction; every option should be one command away | S |
 | 14 | **Quiet hours** — `psst quiet-hours 22:00-09:00`, plus a `when=` time window per hint | Late-night you does not want productivity tips | S |

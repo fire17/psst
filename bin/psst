@@ -4,7 +4,7 @@
 emulate -R zsh
 setopt extended_glob typeset_silent
 
-typeset -g PSST_VERSION="0.3.2"
+typeset -g PSST_VERSION="0.4.0"
 typeset -g SCRIPT=${0:A}
 typeset -g PSST_ROOT=${SCRIPT:h:h}
 source "$PSST_ROOT/lib/core.zsh"
@@ -179,6 +179,9 @@ psst_cmd_add() {
     case $1 in
       --pat|-P)      kind=pat; shift ;;
       --any|-A)      kind=any; shift ;;
+      --warn|-w)     tags+=("confirm=warn"); shift ;;
+      --danger|-D)   tags+=("confirm=danger"); shift ;;
+      --no-guard)    tags+=("confirm=off"); shift ;;
       --cooldown|--chance|--tag|--unless|--in|--id|-c|-p|-t|-u)
         # value-taking flags: a dangling one must die here — a failed `shift 2`
         # would leave $1 in place and spin the loop forever
@@ -218,7 +221,12 @@ psst_cmd_add() {
   rows+=("${id}	1	${kind}	${targets}	${cooldown}	${chance}	${snooze}	${tagstr}	${hint}")
   _save_rows
   ok "added ${C_BOLD}${id}${C_OFF} — fires on ${C_CYAN}$(_when_desc $kind "$targets")${C_OFF}"
-  PSST_FORCE=1 _psst_emit "$hint"
+  _psst_guard_level "$tagstr" "$hint"
+  PSST_FORCE=1 _psst_emit "$hint" "$REPLY"
+  case $REPLY in
+    warn)   note "guarded: ⚠️ ${PSST_GUARD_WARN:-30}s Are-you-sure countdown before the command runs" ;;
+    danger) note "guarded: ❗ ${PSST_GUARD_DANGER:-60}s red countdown before the command runs" ;;
+  esac
 }
 
 psst_cmd_list() {
@@ -259,10 +267,13 @@ psst_cmd_list() {
     local mark="${C_GREEN}●${C_OFF}"
     [[ $on != 1 ]] && mark="${C_DIM}○${C_OFF}"
     (( snooze > now )) && mark="${C_YEL}◐${C_OFF}"
-    local extras=""
+    local extras="" REPLY=""
     (( cooldown > 0 )) && extras+=" ${C_DIM}⏱$(_secs_to_human $cooldown)${C_OFF}"
     (( chance < 100 )) && extras+=" ${C_DIM}🎲${chance}%${C_OFF}"
     (( snooze > now )) && extras+=" ${C_YEL}zzz $(_secs_to_human $(( snooze - now )))${C_OFF}"
+    _psst_guard_level "$tags" "$hint"
+    [[ $REPLY == warn ]]   && extras+=" ${C_YEL}⚠️ guarded${C_OFF}"
+    [[ $REPLY == danger ]] && extras+=" ${C_RED}❗ guarded${C_OFF}"
     [[ $tags != - ]] && extras+=" ${C_DIM}[$tags]${C_OFF}"
     local line="${C_DIM}${id}${C_OFF}  ${mark}  ${C_CYAN}$(_when_desc $kind "$targets")${C_OFF}  ${hint}${extras}"
     if (( tui_lines )); then
@@ -406,9 +417,15 @@ _show_row() { # <index into $rows>
     print -r -- "${C_BOLD}snoozed${C_OFF}   no"
   fi
   print -r -- "${C_BOLD}tags${C_OFF}      $F[8]"
+  local REPLY; _psst_guard_level "$F[8]" "$F[9]"
+  case $REPLY in
+    warn)   print -r -- "${C_BOLD}guard${C_OFF}     ${C_YEL}⚠️ warn — ${PSST_GUARD_WARN:-30}s Are-you-sure countdown${C_OFF}" ;;
+    danger) print -r -- "${C_BOLD}guard${C_OFF}     ${C_RED}❗ danger — ${PSST_GUARD_DANGER:-60}s countdown, red alert${C_OFF}" ;;
+    *)      print -r -- "${C_BOLD}guard${C_OFF}     none" ;;
+  esac
   print -r -- "${C_BOLD}hint${C_OFF}      $F[9]"
   print
-  PSST_FORCE=1 _psst_emit "$F[9]"
+  PSST_FORCE=1 _psst_emit "$F[9]" "$REPLY"
 }
 
 psst_cmd_rm() {
@@ -544,8 +561,11 @@ _scope_list() { # <base>
       others=("${(@)others:#$base}")
       (( $#others )) && when=" ${C_DIM}(also: ${(j:, :)others})${C_OFF}"
     fi
-    local extras=""
+    local extras="" REPLY=""
     _row_suppressed "$F[8]" && extras+=" ${C_DIM}◇ already using it${C_OFF}"
+    _psst_guard_level "$F[8]" "$F[9]"
+    [[ $REPLY == warn ]]   && extras+=" ${C_YEL}⚠️ guarded${C_OFF}"
+    [[ $REPLY == danger ]] && extras+=" ${C_RED}❗ guarded${C_OFF}"
     (( F[5] > 0 )) && extras+=" ${C_DIM}⏱$(_secs_to_human $F[5])${C_OFF}"
     (( F[6] < 100 )) && extras+=" ${C_DIM}🎲${F[6]}%${C_OFF}"
     (( F[7] > now )) && extras+=" ${C_YEL}zzz $(_secs_to_human $(( F[7] - now )))${C_OFF}"
@@ -638,14 +658,18 @@ psst_cmd_try() {
   local now=$EPOCHSECONDS rec
   print -r -- "${C_PINK}${C_BOLD}psst${C_OFF} ${C_DIM}· $#reply hint(s) match:${C_OFF} $line"
   for rec in "${reply[@]}"; do
-    local -a f; f=("${(@ps:\x1f:)rec}")   # id cooldown chance until dir hint
+    local -a f; f=("${(@ps:\x1f:)rec}")   # id cooldown chance until dir guard hint
     local why=""
     (( f[4] > now )) && why+=" ${C_YEL}(snoozed)${C_OFF}"
     if [[ $f[5] != - ]]; then
       [[ $PWD == ${~f[5]}* ]] || why+=" ${C_YEL}(only in $f[5])${C_OFF}"
     fi
     (( f[3] < 100 )) && why+=" ${C_DIM}(${f[3]}% chance)${C_OFF}"
-    print -r -- "  ${C_DIM}$f[1]${C_OFF}  $f[6]$why"
+    case $f[6] in
+      warn)   why+=" ${C_YEL}(guard: ⚠️ ${PSST_GUARD_WARN:-30}s countdown)${C_OFF}" ;;
+      danger) why+=" ${C_RED}(guard: ❗ ${PSST_GUARD_DANGER:-60}s countdown)${C_OFF}" ;;
+    esac
+    print -r -- "  ${C_DIM}$f[1]${C_OFF}  $f[7]$why"
   done
 }
 
@@ -765,6 +789,24 @@ psst_cmd_stats() {
   print -rl -- "${(On)lines[@]}"
 }
 
+psst_cmd_guard() {
+  local f="$PSST_DIR/guard-off"
+  case ${1:-status} in
+    status)
+      if [[ -e $f ]]; then
+        print -r -- "${C_PINK}${C_BOLD}psst guard${C_OFF} is ${C_RED}off${C_OFF} ${C_DIM}— warning hints show but never pause for confirmation${C_OFF}"
+      else
+        print -r -- "${C_PINK}${C_BOLD}psst guard${C_OFF} is ${C_GREEN}on${C_OFF} — ${C_YEL}⚠️ warn${C_OFF} hints hold ${PSST_GUARD_WARN:-30}s, ${C_RED}❗ danger${C_OFF} hints hold ${PSST_GUARD_DANGER:-60}s"
+        print -r -- "${C_DIM}Enter = run now · Esc/Ctrl+C = cancel · timeout = auto-run${C_OFF}"
+        print -r -- "${C_DIM}durations: PSST_GUARD_WARN / PSST_GUARD_DANGER in $PSST_DIR/config.zsh${C_OFF}"
+      fi
+      ;;
+    on)  command rm -f "$f"; ok "guard on — ⚠️/❗ hints now ask before the command runs" ;;
+    off) _ensure_store; : > "$f"; ok "guard off — warnings still show, commands run immediately" ;;
+    *)   die "usage: psst guard [status|on|off]" ;;
+  esac
+}
+
 # resolve the effective pause seconds the way the hook does (file > default;
 # the CLI ignores session-local $PSST_PAUSE on purpose — this is the global view)
 _pause_current() {
@@ -820,6 +862,8 @@ psst_cmd_demo() {
   print -r -- "${C_DIM}this is how hints look (customize in $PSST_DIR/config.zsh):${C_OFF}"
   PSST_FORCE=1 _psst_emit "Use fresh for a more modern file editor! :D"
   PSST_FORCE=1 PSST_ICON="🌱" PSST_PREFIX="tip" _psst_emit "icons and prefix are configurable"
+  PSST_FORCE=1 _psst_emit "⚠️ warning hints hold the command — Are you sure? (${PSST_GUARD_WARN:-30}s countdown)" warn
+  PSST_FORCE=1 _psst_emit "❗ dangerous ones go red and hold ${PSST_GUARD_DANGER:-60}s — Esc cancels the command" danger
 }
 
 psst_cmd_status() {
@@ -834,7 +878,9 @@ psst_cmd_status() {
   local REPLY; _pause_current
   local pstate="pause ${REPLY}s"
   (( REPLY > 0 )) || pstate="pause off"
-  print -r -- "${C_PINK}${C_BOLD}psst${C_OFF} v$PSST_VERSION is $state ${C_DIM}· $enabled/$#rows hints enabled · $pstate${C_OFF}"
+  local gstate="guard on"
+  [[ -e $PSST_DIR/guard-off ]] && gstate="guard off"
+  print -r -- "${C_PINK}${C_BOLD}psst${C_OFF} v$PSST_VERSION is $state ${C_DIM}· $enabled/$#rows hints enabled · $pstate · $gstate${C_OFF}"
   local -a hidden; _read_hidden
   (( $#hidden )) && print -r -- "${C_DIM}hidden: ${(j:, :)hidden}${C_OFF}"
   print -r -- "${C_DIM}hints:  $PSST_HINTS${C_OFF}"
@@ -920,6 +966,8 @@ ${C_BOLD}add hints${C_OFF}
   psst add --any <hint...>             hint on any command (pair with --chance/--cooldown)
     flags: --cooldown 2h  --chance 25  --tag work  --in ~/dir
            --unless zoxide   (skip the hint if that tool is already installed/active)
+           --warn / --danger (hold the command behind an Are-you-sure countdown)
+           hints containing ⚠️ auto-guard as warn, ❗/🚨 as danger (--no-guard opts out)
 
 ${C_BOLD}browse${C_OFF}
   psst list             table: one row per command (count + example hint)
@@ -942,6 +990,8 @@ ${C_BOLD}manage${C_OFF}
   psst on / off [id]           enable/disable ALL of psst globally, or one hint
   psst pause [on|off|<secs>]   1s breather before the first hint-ed run of a
                                command (once per command, resets daily)
+  psst guard [on|off]          ⚠️/❗ hints hold the command behind a live countdown
+                               (30s/60s · Enter = run now · Esc/Ctrl+C = cancel)
   psst toggle <id>             flip one hint
   psst snooze <id> [7d]        mute for a while     psst wake <id>  unmute
   psst done <id>               'learned it' — keep but stop showing

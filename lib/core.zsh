@@ -32,6 +32,7 @@ typeset -g  _psst_paused_day=""
 typeset -g  _psst_paused_sig=""
 typeset -gA _psst_hidden      # base command -> 1 if psst is muted for it
 typeset -g  _psst_hidden_sig=""
+typeset -g  _psst_guard_result=""  # proceed | cancel — set by _psst_guard
 
 # _psst_file_sig — sets REPLY to the hints file signature ("missing" if unreadable)
 _psst_file_sig() {
@@ -56,7 +57,29 @@ _psst_hidden_load() {
   return 0
 }
 
-# record layout, $'\x1f'-separated: id cooldown chance until dir hint
+# _psst_guard_level <tags> <hint-text> — sets REPLY to - | warn | danger.
+# Explicit confirm= tag wins; otherwise the hint's own emoji vocabulary is the
+# signal: ❗/🚨 mean danger, ⚠️ means warn. confirm=off opts out entirely.
+_psst_guard_level() {
+  REPLY="-"
+  local tag
+  if [[ $1 == *confirm=* ]]; then
+    for tag in ${(s:,:)1}; do
+      case $tag in
+        confirm=danger) REPLY=danger; return 0 ;;
+        confirm=warn)   REPLY=warn;   return 0 ;;
+        confirm=off|confirm=none) return 0 ;;
+      esac
+    done
+  fi
+  case $2 in
+    (*❗*|*🚨*) REPLY=danger ;;
+    (*⚠*)      REPLY=warn ;;
+  esac
+  return 0
+}
+
+# record layout, $'\x1f'-separated: id cooldown chance until dir guard hint
 _psst_load() {
   emulate -L zsh
   _psst_cmd_map=() _psst_pat_list=() _psst_any_list=()
@@ -65,7 +88,7 @@ _psst_load() {
   _psst_sig=$REPLY
   [[ $_psst_sig == missing ]] && return 0
   local id on kind targets cooldown chance snooze tags hint
-  local rec t dir tag u skip
+  local rec t dir tag u skip guard
   while IFS=$'\t' read -r id on kind targets cooldown chance snooze tags hint || [[ -n $id ]]; do
     [[ -z $id || $id == \#* ]] && continue
     [[ $on == 1 ]] || continue
@@ -83,7 +106,9 @@ _psst_load() {
       done
     fi
     (( skip )) && continue
-    rec="${id}"$'\x1f'"${cooldown:-0}"$'\x1f'"${chance:-100}"$'\x1f'"${snooze:-0}"$'\x1f'"${dir}"$'\x1f'"${hint}"
+    _psst_guard_level "$tags" "$hint"
+    guard=$REPLY
+    rec="${id}"$'\x1f'"${cooldown:-0}"$'\x1f'"${chance:-100}"$'\x1f'"${snooze:-0}"$'\x1f'"${dir}"$'\x1f'"${guard}"$'\x1f'"${hint}"
     case $kind in
       cmd)
         for t in ${(s:,:)targets}; do
@@ -197,14 +222,75 @@ _psst_match() {
   return 0
 }
 
-# _psst_emit <hint-text> — print one styled hint line to stderr
+# _psst_emit <hint-text> [level] — print one styled hint line to stderr.
+# warn → yellow with a ⚠️ badge; danger → red with ❗⚠️. The badge replaces a
+# leading ⚠️/❗ in the text so it never doubles up.
 _psst_emit() {
-  local style=${PSST_STYLE:-$'\e[1;38;5;213m'}
-  local body=${PSST_BODY_STYLE:-$'\e[0;38;5;213m'}
-  local icon=${PSST_ICON:-💡}
-  local prefix=${PSST_PREFIX:-psst}
+  local level=${2:--}
   local reset=$'\e[0m'
-  print -r -- "${style}${icon} ${prefix}${reset}${body} · ${1}${reset}" >&2
+  local style body icon prefix=${PSST_PREFIX:-psst} btext=$1
+  case $level in
+    danger)
+      style=${PSST_DANGER_STYLE:-$'\e[1;38;5;196m'}
+      body=${PSST_DANGER_BODY_STYLE:-$'\e[0;38;5;196m'}
+      icon="❗⚠️"
+      btext=${btext#❗ }; btext=${btext#⚠️ }
+      ;;
+    warn)
+      style=${PSST_WARN_STYLE:-$'\e[1;38;5;220m'}
+      body=${PSST_WARN_BODY_STYLE:-$'\e[0;38;5;220m'}
+      icon="⚠️"
+      btext=${btext#⚠️ }
+      ;;
+    *)
+      style=${PSST_STYLE:-$'\e[1;38;5;213m'}
+      body=${PSST_BODY_STYLE:-$'\e[0;38;5;213m'}
+      icon=${PSST_ICON:-💡}
+      ;;
+  esac
+  print -r -- "${style}${icon} ${prefix}${reset}${body} · ${btext}${reset}" >&2
+}
+
+# _psst_guard <level> — live "Are you sure?" countdown on stderr.
+# Enter → run now · Esc/Ctrl+C → cancel · timeout → auto-continue.
+# Sets _psst_guard_result to proceed|cancel. Never fails.
+_psst_guard() {
+  emulate -L zsh
+  setopt localtraps
+  local level=$1 secs style label reset=$'\e[0m'
+  if [[ $level == danger ]]; then
+    secs=${PSST_GUARD_DANGER:-60}
+    style=$'\e[1;38;5;196m'
+    label="❗ ARE YOU SURE?"
+  else
+    secs=${PSST_GUARD_WARN:-30}
+    style=$'\e[1;38;5;220m'
+    label="⏳ Are you sure?"
+  fi
+  [[ $secs == <-> ]] || secs=30
+  _psst_guard_result=proceed
+  trap '_psst_guard_result=cancel' INT
+  # a real terminal needs read -k's raw-mode handling (canonical mode would
+  # buffer until Enter); a pipe (tests) needs an explicit -u 0
+  local -a rdopts
+  [[ -t 0 ]] || rdopts=(-u 0)
+  local key left
+  for (( left = secs; left > 0; left-- )); do
+    print -rn -- $'\r\e[K'"${style}   ${label}${reset} auto-runs in ${style}${left}s${reset} ${PSST_DIM:-$'\e[2m'}· Enter = run now · Esc/Ctrl+C = cancel${reset} " >&2
+    key=""
+    read -s -t 1 -k 1 $rdopts key 2>/dev/null
+    [[ $_psst_guard_result == cancel ]] && break
+    case $key in
+      ($'\r'|$'\n') break ;;
+      ($'\e'|$'\x03') _psst_guard_result=cancel; break ;;
+    esac
+  done
+  # drain queued bytes (e.g. the [A of an arrow key) so nothing leaks to zle
+  while read -s -t 0 -k 1 $rdopts key 2>/dev/null; do :; done
+  print -rn -- $'\r\e[K' >&2
+  [[ $_psst_guard_result == cancel ]] && \
+    print -r -- $'\e[1;32m'"✋ psst · cancelled — command not run${reset}" >&2
+  return 0
 }
 
 # _psst_pause_maybe <base> <now> — after a hint fires, hold the command for a
@@ -300,7 +386,7 @@ _psst_preexec() {
     local -a live f
     local rec
     for rec in "${reply[@]}"; do
-      f=("${(@ps:\x1f:)rec}")   # id cooldown chance until dir hint
+      f=("${(@ps:\x1f:)rec}")   # id cooldown chance until dir guard hint
       (( f[4] > now )) && continue                                              # snoozed
       (( f[2] > 0 && now - ${_psst_last_shown[$f[1]]:-0} < f[2] )) && continue  # cooldown
       if [[ $f[5] != - ]]; then                                                 # dir-scoped
@@ -317,15 +403,26 @@ _psst_preexec() {
     _psst_rand $#live
     rec=$live[$(( REPLY + 1 ))]
     f=("${(@ps:\x1f:)rec}")
-    _psst_emit "$f[6]"
+    _psst_emit "$f[7]" "$f[6]"
     _psst_last_shown[$f[1]]=$now
     _psst_last_any=$now
-    _psst_pause_maybe "$base" $now
     if [[ ${PSST_STATS:-1} == 1 ]]; then
       if [[ ! -d $PSST_STATE_DIR ]]; then
         zf_mkdir -p "$PSST_STATE_DIR" 2>/dev/null || command mkdir -p "$PSST_STATE_DIR" 2>/dev/null
       fi
       print -r -- "${EPOCHSECONDS}"$'\t'"$f[1]" 2>/dev/null >> "$PSST_STATE_DIR/shown.log"
+    fi
+    if [[ $f[6] != - && ${PSST_GUARD:-1} != 0 && ! -e $PSST_DIR/guard-off ]] \
+       && { [[ -t 0 && -t 2 ]] || [[ -n $PSST_GUARD_FORCE ]] }; then
+      _psst_guard "$f[6]"
+      if [[ $_psst_guard_result == cancel ]]; then
+        # abort the pending command: an interrupt during preexec makes zsh
+        # drop the command line and return to the prompt (pty-verified)
+        [[ -n $PSST_GUARD_NO_KILL ]] || kill -INT $$
+        return 0
+      fi
+    else
+      _psst_pause_maybe "$base" $now
     fi
   } always {
     return 0

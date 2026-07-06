@@ -1,6 +1,8 @@
 # psst pack: safety — a gentle tap on the shoulder before the scary ones
 # columns: kind	targets	cooldown	chance	tags	hint
-pat	(sudo |)rm (-rf|-fr)*	0	100	-	⚠️ recursive force-delete — double-check that path
-pat	chmod (-R |)777*	0	100	-	777 is world-writable — 755 (dirs) / 644 (files) is usually right
-pat	dd *of=/dev/*	0	100	-	⚠️ dd writes raw bytes to a device — triple-check of=
-pat	*curl*\|* (sh|bash|zsh)*	600	100	-	piping the internet into your shell — maybe read it first: curl -O … && less
+# confirm=danger → ❗ 60s red countdown · confirm=warn → ⚠️ 30s countdown
+# (hints containing ⚠️ auto-guard as warn even without a tag)
+pat	(sudo |)rm (-rf|-fr)*	0	100	confirm=danger	⚠️ recursive force-delete — double-check that path
+pat	chmod (-R |)777*	0	100	confirm=warn	777 is world-writable — 755 (dirs) / 644 (files) is usually right
+pat	dd *of=/dev/*	0	100	confirm=danger	⚠️ dd writes raw bytes to a device — triple-check of=
+pat	*curl*\|* (sh|bash|zsh)*	600	100	confirm=warn	piping the internet into your shell — maybe read it first: curl -O … && less

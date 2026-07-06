@@ -64,7 +64,8 @@ $ git push --force
 💡 psst · --force-with-lease refuses to clobber teammates' pushes 🛟
 
 $ sudo rm -rf ./build
-💡 psst · ⚠️ recursive force-delete — double-check that path
+❗⚠️ psst · recursive force-delete — double-check that path
+   ❗ ARE YOU SURE? auto-runs in 60s · Enter = run now · Esc/Ctrl+C = cancel
 
 $ git checkout -b feature/hints
 💡 psst · modern git: git switch -c <branch>
@@ -123,6 +124,9 @@ psst add --cooldown 30m cat "bat is cat with wings"
 # suppress a hint wherever the suggested tool is already installed/active
 psst add --unless zoxide cd "zoxide learns your dirs — z proj jumps anywhere"
 
+# guard scary commands behind an Are-you-sure countdown (see "The guard" below)
+psst add --danger --pat 'terraform destroy*' "production? PRODUCTION?!"
+
 # browse: a table of commands, then drill in
 psst list            # one row per command: count + example hint
 psst nano list       # numbered hints for one command
@@ -140,6 +144,28 @@ psst try "git push -f"   # debug: which hints would fire?
 psst stats           # what actually fires, how often
 psst export team.tsv / import team.tsv   # share hint sets
 ```
+
+### The guard 🛑
+
+A warning that scrolls past isn't a warning. When a hint carries one, psst **holds the
+command behind a live countdown**:
+
+```
+$ dd if=disk.img of=/dev/disk2
+❗⚠️ psst · dd writes raw bytes to a device — triple-check of=
+   ❗ ARE YOU SURE? auto-runs in 60s · Enter = run now · Esc/Ctrl+C = cancel
+```
+
+- a hint containing **⚠️** (or added with `--warn`) → yellow *Are you sure?* with a **30s** countdown
+- **❗**/**🚨** (or `--danger`) → red *ARE YOU SURE?* with a **60s** countdown
+- **Enter** runs it now · **Esc / Ctrl+C** cancels — the command never executes · countdown
+  end auto-runs, so an unattended shell is never stuck
+- the safety pack ships `rm -rf` and `dd of=/dev/…` as danger, `chmod 777` and `curl | sh` as warn
+- control it: `psst guard off|on` (global, instant), `PSST_GUARD=0` (session), `--no-guard`
+  (per hint), `PSST_GUARD_WARN=15` / `PSST_GUARD_DANGER=45` (durations)
+
+The cancel really cancels: psst interrupts the shell during `preexec`, zsh drops the pending
+command and hands you a fresh prompt (pty-verified with live `rm -rf` targets).
 
 ### The breather ⏸️
 
@@ -201,6 +227,9 @@ PSST_MIN_GAP=0                 # min seconds between any two hints
 PSST_STATS=1                   # log fires for `psst stats` (0 to disable)
 PSST_PAUSE=1                   # first-hint-of-the-day breather, seconds (0 = off;
                                # prefer `psst pause …` to change it everywhere at once)
+PSST_GUARD=1                   # Are-you-sure countdowns on ⚠️/❗ hints (0 = off;
+PSST_GUARD_WARN=30             #   prefer `psst guard on/off` for the global switch)
+PSST_GUARD_DANGER=60
 ```
 
 `psst doctor` checks your whole setup; `psst demo` previews styling.

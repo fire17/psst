@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.4.0 — 2026-07-06
+
+- **the guard 🛑**: hints that warrant a warning now hold the command behind a live
+  Are-you-sure countdown — ⚠️ (or `--warn`) → yellow, 30s; ❗/🚨 (or `--danger`) →
+  red ❗⚠️, 60s. Enter = run now, Esc/Ctrl+C = cancel (the command never executes,
+  pty-verified), countdown end = auto-run. Roadmap #11, shipped.
+- auto-detection from the hint's own text (⚠️→warn, ❗/🚨→danger); `--no-guard` opts out
+- `psst guard on|off|status` global switch; `PSST_GUARD=0` per session;
+  `PSST_GUARD_WARN`/`PSST_GUARD_DANGER` durations
+- safety pack: `rm -rf` and `dd of=/dev/…` are danger-guarded, `chmod 777` and
+  `curl | sh` warn-guarded
+- guarded hints show in list/show/try (`⚠️ guarded` / `❗ guarded`); demo shows the styles
+- 16 new tests (108 total); fixed a zsh `local REPLY` re-declaration output leak
+
 ## v0.3.2 — 2026-07-06
 
 - docs: README "What it feels like" showcase (real output of the bundled packs) and

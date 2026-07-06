@@ -14,7 +14,9 @@ export PSST_STATE_DIR=$SANDBOX/state
 export PSST_FORCE=1          # bypass tty check — tests capture stderr
 export NO_COLOR=1
 export PSST_PAUSE=0          # keep tests instant; pause has its own timed section
-unset PSST_QUIET PSST_MIN_GAP PSST_STYLE PSST_ICON PSST_PREFIX
+export PSST_GUARD=0          # guard has its own section (forced + no-kill there)
+export PSST_GUARD_NO_KILL=1  # NEVER let a guard cancel SIGINT the test runner
+unset PSST_QUIET PSST_MIN_GAP PSST_STYLE PSST_ICON PSST_PREFIX PSST_GUARD_FORCE
 
 source "$ROOT/lib/core.zsh"
 
@@ -375,6 +377,46 @@ assert_contains "pause accepts custom seconds" "$out" "0.5"
 "$CLI" pause off >/dev/null
 out=$("$CLI" pause status)
 assert_contains "pause status reports off" "$out" "off"
+
+print "— guard: Are-you-sure countdown on ⚠️/❗ hints —"
+reset_store
+"$CLI" add nano "⚠️ scary nano thing" >/dev/null
+"$CLI" add --danger dd "wipe alert" >/dev/null
+"$CLI" add --no-guard cat "⚠️ loud but harmless" >/dev/null
+guardhook() { # typed — guard forced on, tiny timeouts, stdin inherited
+  _psst_load
+  PSST_GUARD=1 PSST_GUARD_FORCE=1 PSST_GUARD_WARN=2 PSST_GUARD_DANGER=3 \
+    _psst_preexec "$1" "" "$1" 2>&1
+}
+out=$(guardhook "nano f" </dev/null)
+assert_contains "⚠️ hint auto-guards as warn" "$out" "Are you sure?"
+assert_contains "warn countdown shows seconds" "$out" "auto-runs in"
+if [[ $out == *cancelled* ]]; then fail "timeout should proceed, not cancel" "$out"; else pass "timeout auto-continues"; fi
+out=$(print -n $'\n' | guardhook "nano f")
+if [[ $out == *cancelled* ]]; then fail "Enter should proceed" "$out"; else pass "Enter runs immediately"; fi
+out=$(print -n $'\e' | guardhook "nano f")
+assert_contains "Esc cancels the command" "$out" "cancelled — command not run"
+out=$(print -n $'\x03' | guardhook "nano f")
+assert_contains "Ctrl+C (raw) cancels too" "$out" "cancelled — command not run"
+out=$(guardhook "dd if=/dev/zero" </dev/null)
+assert_contains "--danger uses the red ARE YOU SURE form" "$out" "ARE YOU SURE?"
+assert_contains "danger emit carries ❗" "$out" "❗"
+out=$(guardhook "cat f" </dev/null)
+if [[ $out == *"Are you sure"* ]]; then fail "--no-guard must skip countdown" "$out"; else pass "--no-guard opts out of auto-⚠️"; fi
+assert_contains "--no-guard still shows the hint" "$out" "loud but harmless"
+"$CLI" guard off >/dev/null
+out=$(guardhook "nano f" </dev/null)
+if [[ $out == *"Are you sure"* ]]; then fail "psst guard off must disable countdown" "$out"; else pass "psst guard off disables globally"; fi
+assert_contains "guard off still shows the warning hint" "$out" "scary nano thing"
+"$CLI" guard on >/dev/null
+out=$(hook "nano f")   # PSST_GUARD=0 session env
+if [[ $out == *"Are you sure"* ]]; then fail "PSST_GUARD=0 must disable countdown" "$out"; else pass "PSST_GUARD=0 disables per session"; fi
+out=$("$CLI" try dd if=/dev/zero of=/dev/disk9)
+assert_contains "try reports guard level" "$out" "guard: ❗"
+out=$("$CLI" list --full)
+assert_contains "list marks guarded hints" "$out" "guarded"
+out=$("$CLI" pack install safety && "$CLI" list --full)
+assert_contains "safety pack rows are danger-guarded" "$out" "confirm=danger"
 
 print "— performance (hot path) —"
 reset_store
