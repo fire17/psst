@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.3.0 — 2026-07-06
+
+- **per-command mute**: `psst hide <cmd>` silences everything psst does for a base command
+  (cmd, pattern and any-hints; alias-aware; instant across sessions); `psst show <cmd>`
+  unmutes; bare `psst hide` lists what's muted
+- **`psst list` is now a table**: one row per base command with hint count and an example;
+  `◇ already using it` marks unless-covered commands; flat view moved to `psst list --full`
+- **command-scoped verbs**: `psst <cmd> list` (numbered), `psst <cmd> add <hint…>`,
+  `psst <cmd> rm <n>`, `psst <cmd> hide/show/on/off`; `psst any …` manages --any hints
+- `psst show <id>` still prints hint details; `psst try` warns when the command is hidden
+- 20 new tests (88 total)
+
 ## v0.2.0 — 2026-07-06
 
 - **breather pause**: the first time a hint fires for a command each day, the command is

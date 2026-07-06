@@ -73,11 +73,19 @@ psst add --cooldown 30m cat "bat is cat with wings"
 # suppress a hint wherever the suggested tool is already installed/active
 psst add --unless zoxide cd "zoxide learns your dirs — z proj jumps anywhere"
 
+# browse: a table of commands, then drill in
+psst list            # one row per command: count + example hint
+psst nano list       # numbered hints for one command
+psst nano add "or helix — modal editing without the vim cliff"
+psst nano rm 2       # remove its 2nd hint
+psst hide nano       # mute EVERYTHING psst does for nano…
+psst show nano       # …and bring it back (psst hide lists what's muted)
+
 # lifecycle
-psst list            # pretty overview          psst tui        # fzf manager
-psst snooze 3fa2 7d  # mute for a week          psst wake 3fa2
-psst done 3fa2       # learned it — archive     psst on / off   # ALL of psst, globally
-psst pause off       # kill the 1s breather     psst pause 2    # or make it longer
+psst tui             # fzf manager               psst list --full  # every hint, flat
+psst snooze 3fa2 7d  # mute for a week           psst wake 3fa2
+psst done 3fa2       # learned it — archive      psst on / off     # ALL of psst, globally
+psst pause off       # kill the 1s breather      psst pause 2      # or make it longer
 psst try "git push -f"   # debug: which hints would fire?
 psst stats           # what actually fires, how often
 psst export team.tsv / import team.tsv   # share hint sets
@@ -99,6 +107,8 @@ globally, `PSST_PAUSE=0` per session.
 - **Alias-redirect detection**: if you type `cat` but your `alias cat='bat'` already redirects
   it, hints registered on `cat` are suppressed — you've clearly upgraded. (Hints for `bat`
   itself still work through the alias.)
+- `psst list` marks fully-covered commands with `◇ already using it` instead of pretending
+  they'd fire.
 
 Session controls: `PSST_QUIET=1` mutes the current shell; `PSST_MIN_GAP=30` shows at most one
 hint per 30s globally.

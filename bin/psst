@@ -4,7 +4,7 @@
 emulate -R zsh
 setopt extended_glob typeset_silent
 
-typeset -g PSST_VERSION="0.2.0"
+typeset -g PSST_VERSION="0.3.0"
 typeset -g SCRIPT=${0:A}
 typeset -g PSST_ROOT=${SCRIPT:h:h}
 source "$PSST_ROOT/lib/core.zsh"
@@ -105,6 +105,71 @@ _when_desc() { # kind targets -> human description of when it fires
   esac
 }
 
+# ---------- hidden commands (per-command mute) ----------
+_read_hidden() { # fills $hidden (declare in caller)
+  hidden=()
+  [[ -r $PSST_DIR/hidden ]] || return 0
+  local line
+  while IFS= read -r line || [[ -n $line ]]; do
+    [[ -z $line || $line == \#* ]] && continue
+    hidden+=("$line")
+  done < "$PSST_DIR/hidden"
+}
+
+_save_hidden() {
+  _ensure_store
+  local tmp="$PSST_DIR/hidden.tmp.$$"
+  { (( $#hidden == 0 )) || print -rl -- "${hidden[@]}" } > "$tmp" || die "failed writing $tmp"
+  command mv -f "$tmp" "$PSST_DIR/hidden" || die "failed updating hidden list"
+}
+
+_unhide() { # <cmd>; returns 1 if it wasn't hidden
+  local -a hidden; _read_hidden
+  local i=${hidden[(Ie)$1]}
+  (( i )) || return 1
+  hidden[$i]=()
+  _save_hidden
+  ok "${C_BOLD}$1${C_OFF} is visible again"
+  return 0
+}
+
+# _row_suppressed <tags> — 0 if an unless= tag matches a present tool
+# (i.e. the hint never fires on this machine)
+_row_suppressed() {
+  local tag u
+  [[ $1 == *unless=* ]] || return 1
+  for tag in ${(s:,:)1}; do
+    if [[ $tag == unless=* ]]; then
+      u=${tag#unless=}
+      (( $+commands[$u] || $+functions[$u] || $+aliases[$u] )) && return 0
+    fi
+  done
+  return 1
+}
+
+# _pat_word <pattern> — sets REPLY to the pattern's base command if its first
+# word is a plain name ("git push *…" → git), "" for globby ones
+_pat_word() {
+  local w=${1%% *}
+  if [[ -n $w && $w == [a-zA-Z0-9._+:@/-]## ]]; then REPLY=${w:t}; else REPLY=""; fi
+}
+
+# _rows_for_base <base> — fills $match_idx with indices (into $rows) of hints
+# scoped to that base command; base "any" selects the --any hints
+_rows_for_base() {
+  local base=$1 i REPLY
+  match_idx=()
+  (( $#rows )) || return 0
+  for i in {1..$#rows}; do
+    local -a F; F=("${(@ps:\t:)rows[$i]}")
+    case $F[3] in
+      cmd) [[ ",$F[4]," == *",$base,"* ]] && match_idx+=($i) ;;
+      pat) _pat_word "$F[4]"; [[ $REPLY == "$base" ]] && match_idx+=($i) ;;
+      any) [[ $base == any ]] && match_idx+=($i) ;;
+    esac
+  done
+}
+
 # ---------- subcommands ----------
 psst_cmd_add() {
   local kind=cmd cooldown=0 chance=100 snooze=0 id=""
@@ -150,18 +215,23 @@ psst_cmd_add() {
 }
 
 psst_cmd_list() {
-  local porcelain=0 tui_lines=0 filter=""
+  local porcelain=0 tui_lines=0 full=0 filter=""
   while (( $# )); do
     case $1 in
       --porcelain) porcelain=1; shift ;;
       --tui-lines) tui_lines=1; shift ;;
-      *) filter=$1; shift ;;
+      --full|-f)   full=1; shift ;;
+      *) filter=$1; full=1; shift ;;
     esac
   done
   local -a rows; _read_rows
   if (( ! $#rows )); then
     (( porcelain || tui_lines )) && return 0
     note "no hints yet — try: psst add nano \"Use fresh for a more modern file editor! :D\""
+    return 0
+  fi
+  if (( ! full && ! porcelain && ! tui_lines )); then
+    _list_table
     return 0
   fi
   local now=$EPOCHSECONDS shown=0 enabled=0
@@ -199,11 +269,124 @@ psst_cmd_list() {
   print -rl -- "${out[@]}"
 }
 
+# the default `psst list` view: one row per base command, count + example hint
+_list_table() { # expects $rows
+  local -A bcount bon bex bsupp
+  local -a border
+  local row b t supp REPLY
+  for row in "${rows[@]}"; do
+    local -a F; F=("${(@ps:\t:)row}")
+    local -a bs; bs=()
+    case $F[3] in
+      cmd) for t in ${(s:,:)F[4]}; do [[ -n $t ]] && bs+=("$t"); done ;;
+      pat) _pat_word "$F[4]"; bs=("${REPLY:-(patterns)}") ;;
+      any) bs=("(any)") ;;
+    esac
+    supp=0
+    _row_suppressed "$F[8]" && supp=1
+    for b in "${bs[@]}"; do
+      [[ -z ${bcount[$b]} ]] && border+=("$b")
+      (( bcount[$b]++ ))
+      (( bsupp[$b] += supp ))
+      [[ $F[2] == 1 ]] && (( bon[$b]++ ))
+      [[ -z ${bex[$b]} ]] && bex[$b]=$F[9]
+    done
+  done
+  local -a named special
+  for b in "${(o)border[@]}"; do
+    if [[ $b == \(* ]]; then special+=("$b"); else named+=("$b"); fi
+  done
+  border=("${named[@]}" "${special[@]}")
+  local -a hidden; _read_hidden
+
+  local cw=7
+  for b in "${border[@]}" "${hidden[@]}"; do (( ${#b} > cw )) && cw=${#b}; done
+  (( cw > 20 )) && cw=20
+  local exw=$(( ${COLUMNS:-100} - cw - 16 ))
+  (( exw < 24 )) && exw=24
+
+  print -r -- "${C_PINK}${C_BOLD}psst${C_OFF} ${C_DIM}· $#rows hints across $#border commands · details: psst <command> list${C_OFF}"
+  local pad
+  printf -v pad '%-*s' $cw "COMMAND"
+  print -r -- "${C_DIM}    ${pad}  HINTS  EXAMPLE${C_OFF}"
+  local mark cnt ex hnote
+  for b in "${border[@]}"; do
+    mark="${C_GREEN}●${C_OFF}"
+    (( ${bon[$b]:-0} == 0 )) && mark="${C_DIM}○${C_OFF}"
+    hnote=""
+    if (( ${bsupp[$b]:-0} >= bcount[$b] )); then
+      mark="${C_DIM}◇${C_OFF}"
+      hnote=" ${C_DIM}(already using it)${C_OFF}"
+    fi
+    if (( ${hidden[(Ie)$b]} )); then
+      mark="${C_YEL}○${C_OFF}"
+      hnote=" ${C_YEL}(hidden)${C_OFF}"
+    fi
+    cnt=${bcount[$b]}
+    (( ${bon[$b]:-0} < bcount[$b] )) && cnt="${bon[$b]:-0}/${bcount[$b]}"
+    ex=${bex[$b]}
+    (( ${#ex} > exw )) && ex="${ex[1,$(( exw - 1 ))]}…"
+    printf -v pad '%-*s' $cw "${b[1,$cw]}"
+    print -r -- "  $mark ${C_CYAN}${pad}${C_OFF}  ${(l:5:)cnt}  ${ex}${hnote}"
+  done
+  for b in "${hidden[@]}"; do
+    [[ -n ${bcount[$b]} ]] && continue
+    printf -v pad '%-*s' $cw "${b[1,$cw]}"
+    print -r -- "  ${C_YEL}○${C_OFF} ${C_CYAN}${pad}${C_OFF}  ${(l:5:)0}  ${C_DIM}—${C_OFF} ${C_YEL}(hidden)${C_OFF}"
+  done
+  print -r -- "${C_DIM}psst <command> list|add|rm · psst hide/show <command> · everything: psst list --full${C_OFF}"
+}
+
+psst_cmd_hide() {
+  local -a hidden; _read_hidden
+  if (( ! $# )); then
+    if (( $#hidden )); then
+      print -r -- "${C_PINK}${C_BOLD}psst hidden commands${C_OFF} ${C_DIM}(unhide with: psst show <command>)${C_OFF}"
+      local c
+      for c in "${hidden[@]}"; do print -r -- "  ${C_YEL}○${C_OFF} $c"; done
+    else
+      note "nothing hidden — mute all hints for a command with: psst hide <command>"
+    fi
+    return 0
+  fi
+  local c
+  for c in "$@"; do
+    c=${c:t}
+    if (( ${hidden[(Ie)$c]} )); then
+      note "$c is already hidden"
+    else
+      hidden+=("$c")
+      _save_hidden
+      ok "psst is now hidden for ${C_BOLD}$c${C_OFF} — hints kept, nothing fires (unhide: psst show $c)"
+    fi
+  done
+}
+
+psst_cmd_unhide() {
+  (( $# )) || die "usage: psst unhide <command>"
+  local c
+  for c in "$@"; do
+    _unhide "$c" || note "$c wasn't hidden"
+  done
+}
+
 psst_cmd_show() {
-  [[ -n $1 ]] || die "usage: psst show <id>"
+  [[ -n $1 ]] || die "usage: psst show <id|hidden-command>"
   local -a rows; _read_rows
-  local REPLY; _row_index "$1"; local i=$REPLY
-  local -a F; F=("${(@ps:\t:)rows[$i]}")
+  # a hint id? show its details (ids win over command names)
+  local i
+  if (( $#rows )); then
+    for i in {1..$#rows}; do
+      [[ ${rows[$i]%%	*} == "$1" ]] && { _show_row $i; return 0 }
+    done
+  fi
+  # a hidden command? unhide it
+  _unhide "$1" && return 0
+  die "'$1' is neither a hint id nor a hidden command (see: psst list · psst hide)"
+}
+
+_show_row() { # <index into $rows>
+  local -a F; F=("${(@ps:\t:)rows[$1]}")
   local now=$EPOCHSECONDS
   print -r -- "${C_BOLD}id${C_OFF}        $F[1]"
   print -r -- "${C_BOLD}enabled${C_OFF}   $([[ $F[2] == 1 ]] && print -n yes || print -n no)"
@@ -323,12 +506,120 @@ psst_cmd_edit() {
   ${=${VISUAL:-${EDITOR:-vi}}} "$PSST_HINTS"
 }
 
-psst_cmd_find() { psst_cmd_list "$@" }
+psst_cmd_find() { psst_cmd_list --full "$@" }
+
+# ---------- command-scoped verbs: psst <basecommand> [list|add|rm|hide|show] ----------
+_scope_list() { # <base>
+  local base=$1
+  local -a rows match_idx
+  _read_rows
+  _rows_for_base "$base"
+  local -a hidden; _read_hidden
+  local hid=""
+  (( ${hidden[(Ie)$base]} )) && hid=" ${C_YEL}· hidden (unhide: psst show $base)${C_OFF}"
+  if (( ! $#match_idx )); then
+    note "no hints for '$base' yet — add one: psst $base add \"your hint here\"$hid"
+    note "(if you meant a psst command, see: psst help)"
+    return 0
+  fi
+  print -r -- "${C_PINK}${C_BOLD}psst · $base${C_OFF} ${C_DIM}$#match_idx hint(s)${C_OFF}$hid"
+  local n=0 i now=$EPOCHSECONDS
+  for i in "${match_idx[@]}"; do
+    (( n++ ))
+    local -a F; F=("${(@ps:\t:)rows[$i]}")
+    local mark="${C_GREEN}●${C_OFF}"
+    [[ $F[2] != 1 ]] && mark="${C_DIM}○${C_OFF}"
+    (( F[7] > now )) && mark="${C_YEL}◐${C_OFF}"
+    local when=""
+    [[ $F[3] == pat ]] && when=" ${C_DIM}(match: $F[4])${C_OFF}"
+    if [[ $F[3] == cmd && $F[4] != "$base" ]]; then
+      local -a others; others=(${(s:,:)F[4]})
+      others=("${(@)others:#$base}")
+      (( $#others )) && when=" ${C_DIM}(also: ${(j:, :)others})${C_OFF}"
+    fi
+    local extras=""
+    _row_suppressed "$F[8]" && extras+=" ${C_DIM}◇ already using it${C_OFF}"
+    (( F[5] > 0 )) && extras+=" ${C_DIM}⏱$(_secs_to_human $F[5])${C_OFF}"
+    (( F[6] < 100 )) && extras+=" ${C_DIM}🎲${F[6]}%${C_OFF}"
+    (( F[7] > now )) && extras+=" ${C_YEL}zzz $(_secs_to_human $(( F[7] - now )))${C_OFF}"
+    [[ $F[8] != - ]] && extras+=" ${C_DIM}[$F[8]]${C_OFF}"
+    print -r -- "  ${C_BOLD}${(l:2:)n}${C_OFF}  $mark  $F[9]$when ${C_DIM}($F[1])${C_OFF}$extras"
+  done
+  print -r -- "${C_DIM}psst $base add \"…\" · psst $base rm <n> · psst hide $base${C_OFF}"
+}
+
+psst_scope() { # <base> [verb] [args...]
+  local base=${1:t}; shift
+  local verb=${1:-list}
+  (( $# )) && shift
+  case $verb in
+    list|ls)
+      _scope_list "$base"
+      ;;
+    add)
+      local -a flags
+      while (( $# )); do
+        case $1 in
+          --cooldown|-c|--chance|-p|--tag|-t|--unless|-u|--in|--id)
+            flags+=("$1" "$2"); shift 2 ;;
+          --pat|-P|--any|-A)
+            die "psst $base add takes plain hints — use 'psst add $1 …' for pattern/any hints" ;;
+          *) break ;;
+        esac
+      done
+      (( $# )) || die "usage: psst $base add [flags] <hint...>"
+      if [[ $base == any ]]; then
+        psst_cmd_add --any "${flags[@]}" "$@"
+      else
+        psst_cmd_add "${flags[@]}" "$base" "$@"
+      fi
+      ;;
+    rm|remove)
+      (( $# )) || die "usage: psst $base rm <n|id>   (numbers from: psst $base list)"
+      local -a rows match_idx
+      _read_rows
+      _rows_for_base "$base"
+      local -a ids
+      local sel
+      for sel in "$@"; do
+        if [[ $sel == <-> ]]; then
+          (( sel >= 1 && sel <= $#match_idx )) || die "'$base' has no hint #$sel (see: psst $base list)"
+          ids+=("${rows[$match_idx[$sel]]%%	*}")
+        else
+          ids+=("$sel")
+        fi
+      done
+      psst_cmd_rm "${ids[@]}"
+      ;;
+    hide)   psst_cmd_hide "$base" ;;
+    show|unhide) _unhide "$base" || note "$base wasn't hidden" ;;
+    on|off)
+      local -a rows match_idx
+      _read_rows
+      _rows_for_base "$base"
+      (( $#match_idx )) || die "no hints for '$base'"
+      local -a ids
+      local i
+      for i in "${match_idx[@]}"; do ids+=("${rows[$i]%%	*}"); done
+      psst_cmd_$verb "${ids[@]}"
+      ;;
+    *)
+      die "unknown: psst $base $verb — try: psst $base [list|add <hint...>|rm <n>|hide|show|on|off]"
+      ;;
+  esac
+}
 
 psst_cmd_try() {
   (( $# )) || die "usage: psst try <command line...>"
   local line="$*"
   _psst_load
+  local REPLY base
+  _psst_effective_word "$line" ""
+  base=$REPLY
+  local -a hidden; _read_hidden
+  if [[ -n $base ]] && (( ${hidden[(Ie)$base]} )); then
+    print -r -- "${C_YEL}psst is hidden for '$base' — nothing will fire${C_OFF} ${C_DIM}(unhide: psst show $base)${C_OFF}"
+  fi
   local -a reply
   _psst_match "$line" ""
   if (( ! $#reply )); then
@@ -535,6 +826,8 @@ psst_cmd_status() {
   local pstate="pause ${REPLY}s"
   (( REPLY > 0 )) || pstate="pause off"
   print -r -- "${C_PINK}${C_BOLD}psst${C_OFF} v$PSST_VERSION is $state ${C_DIM}· $enabled/$#rows hints enabled · $pstate${C_OFF}"
+  local -a hidden; _read_hidden
+  (( $#hidden )) && print -r -- "${C_DIM}hidden: ${(j:, :)hidden}${C_OFF}"
   print -r -- "${C_DIM}hints:  $PSST_HINTS${C_OFF}"
   print -r -- "${C_DIM}plugin: $PSST_ROOT${C_OFF}"
 }
@@ -620,11 +913,20 @@ ${C_BOLD}add hints${C_OFF}
            --unless zoxide   (skip the hint if that tool is already installed/active)
 
 ${C_BOLD}browse${C_OFF}
-  psst list [text]      list hints (filter by command, text, or tag)
+  psst list             table: one row per command (count + example hint)
+  psst list --full      every hint, flat · psst find <text> to filter
+  psst <cmd> list       numbered hints for one command (e.g. psst nano list)
   psst tui              interactive manager (fzf)
   psst show <id>        full details of one hint
   psst try <cmdline>    which hints would fire for a command line?
   psst stats            how often each hint fired
+
+${C_BOLD}per-command${C_OFF}
+  psst hide <cmd>       mute EVERYTHING psst does for that command
+  psst show <cmd>       unmute it (psst hide lists what's hidden)
+  psst <cmd> add <hint...>     add a hint for that command
+  psst <cmd> rm <n>            remove its n-th hint (numbers from psst <cmd> list)
+  psst <cmd> on / off          enable/disable all of its hints
 
 ${C_BOLD}manage${C_OFF}
   psst rm <id...>              delete (also: --tag <tag>, --all)
@@ -657,8 +959,11 @@ main() {
   local fn="psst_cmd_${cmd//-/_}"
   if typeset -f -- "$fn" > /dev/null; then
     "$fn" "$@"
+  elif [[ $cmd == -* ]]; then
+    die "unknown flag '$cmd' — see: psst help"
   else
-    die "unknown command '$cmd' — see: psst help"
+    # not a subcommand → treat as a base command scope: psst nano [list|add|rm|…]
+    psst_scope "$cmd" "$@"
   fi
 }
 

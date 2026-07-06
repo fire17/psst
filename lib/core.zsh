@@ -30,6 +30,8 @@ typeset -g  _psst_last_any=0  # epoch any hint was last shown (global gap)
 typeset -gA _psst_paused      # base command -> 1 if already paused today
 typeset -g  _psst_paused_day=""
 typeset -g  _psst_paused_sig=""
+typeset -gA _psst_hidden      # base command -> 1 if psst is muted for it
+typeset -g  _psst_hidden_sig=""
 
 # _psst_file_sig — sets REPLY to the hints file signature ("missing" if unreadable)
 _psst_file_sig() {
@@ -39,6 +41,19 @@ _psst_file_sig() {
   else
     REPLY="missing"
   fi
+}
+
+# _psst_hidden_load — refresh the per-command mute set from $PSST_DIR/hidden
+# (one command name per line). Caller handles mtime-gating.
+_psst_hidden_load() {
+  _psst_hidden=()
+  local line
+  [[ -r $PSST_DIR/hidden ]] || return 0
+  while IFS= read -r line || [[ -n $line ]]; do
+    [[ -z $line || $line == \#* ]] && continue
+    _psst_hidden[$line]=1
+  done < "$PSST_DIR/hidden"
+  return 0
 }
 
 # record layout, $'\x1f'-separated: id cooldown chance until dir hint
@@ -125,27 +140,38 @@ _psst_cmd_word() {
   return 0
 }
 
-# _psst_match <typed> <expanded>
+# _psst_effective_word <typed> <expanded> — sets REPLY to the command the user
+# is really running. If the typed name is an alias that redirects to a
+# DIFFERENT command (alias cat='bat'), the target wins — the user already
+# upgraded, so hints registered on the typed name are suppressed.
+_psst_effective_word() {
+  local tw="" ew=""
+  _psst_cmd_word "$1"; tw=$REPLY
+  if [[ -n $2 && $2 != "$1" ]]; then
+    _psst_cmd_word "$2"; ew=$REPLY
+  fi
+  if [[ -n $ew && -n $tw && $ew != "$tw" ]]; then
+    REPLY=$ew
+  else
+    REPLY=${tw:-$ew}
+  fi
+  return 0
+}
+
+# _psst_match <typed> <expanded> [effective-word]
 # Fills $reply with matching records (deduped by id). Does NOT filter by
 # cooldown/chance/snooze — callers decide (the hook filters, `psst try` shows all).
 _psst_match() {
   emulate -L zsh
   setopt extended_glob
-  local typed=$1 expanded=$2 REPLY
+  local typed=$1 expanded=$2 w=$3 REPLY
   [[ $expanded == "$typed" ]] && expanded=""
   reply=()
   local -A seen
-  local rec pat entry tw="" ew=""
-  _psst_cmd_word "$typed"; tw=$REPLY
-  [[ -n $expanded ]] && { _psst_cmd_word "$expanded"; ew=$REPLY }
-  # If the typed name is an alias that redirects to a DIFFERENT command
-  # (alias cat='bat'), the user already upgraded — suppress hints registered
-  # on the typed name and only consider the real target's hints.
-  local w=""
-  if [[ -n $ew && -n $tw && $ew != "$tw" ]]; then
-    w=$ew
-  else
-    w=${tw:-$ew}
+  local rec pat entry
+  if [[ -z $w ]]; then
+    _psst_effective_word "$typed" "$expanded"
+    w=$REPLY
   fi
   if [[ -n $w && -n ${_psst_cmd_map[$w]} ]]; then
     for rec in "${(@ps:\x1e:)_psst_cmd_map[$w]}"; do
@@ -181,29 +207,20 @@ _psst_emit() {
   print -r -- "${style}${icon} ${prefix}${reset}${body} · ${1}${reset}" >&2
 }
 
-# _psst_pause_maybe <typed> <expanded> <now> — after a hint fires, hold the
-# command for a beat so the hint gets read before output scrolls it away.
-# Applies ONCE per base command per day (persisted across sessions in
+# _psst_pause_maybe <base> <now> — after a hint fires, hold the command for a
+# beat so the hint gets read before output scrolls it away. Applies ONCE per
+# base command per day (persisted across sessions in
 # $PSST_STATE_DIR/paused.tsv), resets daily. Duration resolution:
 # $PSST_PAUSE (session) > $PSST_DIR/pause file (global CLI toggle) > 1s.
 _psst_pause_maybe() {
   emulate -L zsh
-  local now=$3
+  local base=${1:--} now=$2
   local pause=${PSST_PAUSE:-}
   if [[ -z $pause ]]; then
     if [[ -r $PSST_DIR/pause ]]; then pause=$(<$PSST_DIR/pause); else pause=1; fi
   fi
   [[ $pause == (<->|<->.<->|.<->) ]] || pause=1
   (( pause > 0 )) || return 0
-
-  # base command = what the user is really running (alias-resolved)
-  local REPLY base
-  _psst_cmd_word "$1"; base=$REPLY
-  if [[ -n $2 && $2 != "$1" ]]; then
-    _psst_cmd_word "$2"
-    [[ -n $REPLY ]] && base=$REPLY
-  fi
-  [[ -n $base ]] || base="-"
 
   # sync today's already-paused set (mtime-gated, shared across sessions)
   local pfile="$PSST_STATE_DIR/paused.tsv" today psig="missing"
@@ -254,8 +271,24 @@ _psst_preexec() {
     [[ $_psst_sig == missing ]] && return 0
     (( ${#_psst_cmd_map} + ${#_psst_pat_list} + ${#_psst_any_list} )) || return 0
 
+    # per-command mute: `psst hide <cmd>` silences EVERYTHING for that base
+    # command — cmd hints, pattern hints, any-hints (mtime-gated file sync)
+    local base=""
+    _psst_effective_word "$1" "$3"
+    base=$REPLY
+    if [[ -n $base ]]; then
+      local hsig="missing"
+      local -A hst
+      zstat -H hst -- "$PSST_DIR/hidden" 2>/dev/null && hsig="${hst[mtime]}:${hst[size]}:${hst[inode]}"
+      if [[ $hsig != "$_psst_hidden_sig" ]]; then
+        _psst_hidden_sig=$hsig
+        _psst_hidden_load
+      fi
+      [[ -n ${_psst_hidden[$base]} ]] && return 0
+    fi
+
     local -a reply
-    _psst_match "$1" "$3"
+    _psst_match "$1" "$3" "$base"
     (( $#reply )) || return 0
 
     local now=$EPOCHSECONDS
@@ -287,7 +320,7 @@ _psst_preexec() {
     _psst_emit "$f[6]"
     _psst_last_shown[$f[1]]=$now
     _psst_last_any=$now
-    _psst_pause_maybe "$1" "$3" $now
+    _psst_pause_maybe "$base" $now
     if [[ ${PSST_STATS:-1} == 1 ]]; then
       if [[ ! -d $PSST_STATE_DIR ]]; then
         zf_mkdir -p "$PSST_STATE_DIR" 2>/dev/null || command mkdir -p "$PSST_STATE_DIR" 2>/dev/null

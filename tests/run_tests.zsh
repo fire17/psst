@@ -244,6 +244,68 @@ assert_contains "alias to same command still fires" "$out" "use bat!"
 out=$(hook "cat f" "bat f")
 assert_contains "target command's own hints fire through the alias" "$out" "bat power"
 
+print "— hide/show per command —"
+reset_store
+"$CLI" add nano "hidden test hint" >/dev/null
+"$CLI" hide nano >/dev/null
+out=$(hook "nano f")
+assert_empty "hidden command is silent" "$out"
+out=$(hook "n f" "nano f")
+assert_empty "hidden via alias too" "$out"
+out=$("$CLI" hide)
+assert_contains "bare hide lists hidden commands" "$out" "nano"
+out=$("$CLI" try nano f)
+assert_contains "try warns about hidden command" "$out" "hidden"
+"$CLI" show nano >/dev/null
+out=$(hook "nano f")
+assert_contains "show unmutes the command" "$out" "hidden test hint"
+"$CLI" add --pat 'git push *(-f|--force)(| *)' "lease hint" >/dev/null
+"$CLI" add --any "any hint here" >/dev/null
+"$CLI" hide git >/dev/null
+out=$(hook "git push -f")
+assert_empty "hide suppresses pattern & any hints for that command" "$out"
+"$CLI" show git >/dev/null
+addout=$("$CLI" add vim "vim detail hint")
+vid=${${(s: :)${addout#*added }}[1]}
+out=$("$CLI" show $vid)
+assert_contains "show <id> still prints hint details" "$out" "vim detail hint"
+
+print "— list table & command-scoped verbs —"
+reset_store
+"$CLI" add nano "first nano hint" >/dev/null
+"$CLI" add nano "second nano hint" >/dev/null
+"$CLI" add --any "any tip" >/dev/null
+"$CLI" hide nano >/dev/null
+out=$("$CLI" list)
+assert_contains "table shows the command" "$out" "nano"
+assert_contains "table shows example hint" "$out" "first nano hint"
+assert_contains "table shows (any) bucket" "$out" "(any)"
+assert_contains "table marks hidden commands" "$out" "(hidden)"
+"$CLI" show nano >/dev/null
+out=$("$CLI" nano list)
+assert_contains "scoped list is numbered" "$out" " 1"
+assert_contains "scoped list shows all hints" "$out" "second nano hint"
+"$CLI" nano add "third via scope" >/dev/null
+out=$("$CLI" nano list)
+assert_contains "psst <cmd> add works" "$out" "third via scope"
+"$CLI" nano rm 2 >/dev/null
+out=$("$CLI" nano list)
+if [[ $out == *"second nano hint"* ]]; then
+  fail "psst <cmd> rm <n> removed the wrong hint" "$out"
+else
+  pass "psst <cmd> rm <n> removes the n-th hint"
+fi
+assert_contains "other hints survive scoped rm" "$out" "first nano hint"
+out=$("$CLI" any list)
+assert_contains "psst any list manages --any hints" "$out" "any tip"
+out=$("$CLI" nosuchcmd list)
+assert_contains "unknown base command explains itself" "$out" "no hints"
+out=$("$CLI" nano hide && "$CLI" nano list)
+assert_contains "psst <cmd> hide works" "$out" "hidden"
+"$CLI" nano show >/dev/null
+out=$("$CLI" list --full)
+assert_contains "flat view still available via --full" "$out" "first nano hint"
+
 print "— pause: breather once per command per day —"
 reset_store
 "$CLI" add pausecmd,othercmd,stalecmd "read me first" >/dev/null
