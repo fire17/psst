@@ -3,8 +3,8 @@
 class Psst < Formula
   desc "Gentle hints for your shell, right before you need them"
   homepage "https://github.com/fire17/psst"
-  url "https://github.com/fire17/psst/archive/refs/tags/v0.3.2.tar.gz"
-  sha256 "9aae5330acfccb8609661a1607cb24372b1d2867bea8dd38385f9d669fa42110"
+  url "https://github.com/fire17/psst/archive/refs/tags/v0.4.0.tar.gz"
+  sha256 "f77ee090cc0eee1028d65d5286cf9a80ac8b092dcda42b12cb68dc31c65926b0"
   license "MIT"
 
   depends_on "zsh"
